@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>بيئة اختبار محلية — واجبات ألف</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 900px; margin: 3rem auto; padding: 0 1rem; background: #f6f8fb; color: #12243b; }
+    button { padding: .8rem 1.2rem; border-radius: .7rem; cursor: pointer; border: 1px solid #bac9dc; background: white; font: inherit; }
+    nav { display: flex; gap: 1rem; margin: 2rem 0; }
+    section { background: white; border-radius: 1rem; padding: 2rem; box-shadow: 0 8px 30px #192b440a; }
+    label { display: block; border: 1px solid #dbe2eb; padding: 1rem; margin: .7rem 0; border-radius: .6rem; }
+    textarea { display: block; width: 90%; min-height: 6rem; padding: 1rem; font: inherit; }
+    .notice { padding: 1rem; border-radius: .6rem; background: #fff3cd; }
+    [hidden] { display: none !important; }
+  </style>
+</head>
+<body>
+  <p class="notice">هذه صفحة اختبار محلية للمشروع، وليست موقع ألف الحقيقي.</p>
+  <h1>المواد الدراسية</h1>
+  <nav aria-label="المواد">
+    <button data-alef-subject="math">الرياضيات</button>
+    <button data-alef-subject="science">العلوم</button>
+    <button data-alef-subject="arabic">اللغة العربية</button>
+  </nav>
+  <main id="exercise" aria-live="polite"><p>اختر مادة لبدء واجب تجريبي.</p></main>
+  <script>
+    (() => {
+      const completeScenario = new URLSearchParams(location.search).get('scenario') === 'complete';
+      const questions = [
+        { id: 'q1', type: 'single', text: 'ما ناتج 6 × 7؟', options: [['a', '36'], ['b', '42'], ['c', '48']], correct: ['b'] },
+        { id: 'q2', type: 'multiple', text: 'اختر جميع الأعداد الأولية.', options: [['a', '2'], ['b', '3'], ['c', '4']], correct: ['a', 'b'] },
+        { id: 'q3', type: 'text', text: 'اكتب اسم الشكل الذي يتكون من ثلاثة أضلاع.', correct: 'مثلث' },
+        { id: 'q4', type: 'unsupported', text: 'اسحب كل صورة إلى المجموعة المناسبة.' },
+      ].slice(0, completeScenario ? 3 : 4);
+      let index = 0;
+      let submissions = [];
+      const exercise = document.querySelector('#exercise');
+      window.fixture = {
+        get submissions() { return structuredClone(submissions); },
+        get index() { return index; },
+        mutateQuestion() {
+          const node = document.querySelector('[data-alef-question-text]');
+          if (node) node.textContent = 'سؤال مختلف: ما ناتج 8 × 8؟';
+        },
+      };
+      function render() {
+        const question = questions[index];
+        exercise.replaceChildren();
+        if (!question) {
+          const complete = document.createElement('section');
+          complete.dataset.alefCompleted = 'true';
+          complete.textContent = 'أكملت الواجب بنجاح';
+          exercise.append(complete);
+          return;
+        }
+        const section = document.createElement('section');
+        section.dataset.alefQuestion = question.id;
+        section.dataset.questionType = question.type;
+        const heading = document.createElement('h2');
+        heading.dataset.alefQuestionText = '';
+        heading.textContent = question.text;
+        section.append(heading);
+        if (question.options) {
+          for (const [id, text] of question.options) {
+            const label = document.createElement('label');
+            label.dataset.alefOption = id;
+            const input = document.createElement('input');
+            input.type = question.type === 'multiple' ? 'checkbox' : 'radio';
+            input.name = question.id;
+            input.value = id;
+            input.id = question.id + '-' + id;
+            label.htmlFor = input.id;
+            label.append(input, document.createTextNode(' ' + text));
+            section.append(label);
+          }
+        } else if (question.type === 'text') {
+          const textarea = document.createElement('textarea');
+          textarea.dataset.alefAnswer = '';
+          textarea.setAttribute('aria-label', 'الإجابة');
+          section.append(textarea);
+        } else {
+          const activity = document.createElement('div');
+          activity.textContent = 'صور قابلة للسحب';
+          activity.draggable = true;
+          section.append(activity);
+        }
+        const feedback = document.createElement('p');
+        feedback.setAttribute('role', 'status');
+        feedback.id = 'feedback';
+        const submit = document.createElement('button');
+        submit.dataset.alefSubmit = '';
+        submit.textContent = 'إرسال الإجابة';
+        const next = document.createElement('button');
+        next.dataset.alefNext = '';
+        next.textContent = 'السؤال التالي';
+        next.hidden = true;
+        submit.addEventListener('click', () => {
+          const selected = question.options
+            ? Array.from(section.querySelectorAll('input:checked'), input => input.value)
+            : section.querySelector('textarea')?.value.trim();
+          const correct = Array.isArray(question.correct)
+            ? JSON.stringify(selected?.slice().sort()) === JSON.stringify(question.correct.slice().sort())
+            : selected === question.correct;
+          submissions.push({ questionId: question.id, selected, correct });
+          feedback.textContent = correct ? 'إجابة صحيحة' : 'الإجابة غير صحيحة';
+          feedback.dataset.correct = String(correct);
+          submit.disabled = true;
+          next.hidden = false;
+        });
+        next.addEventListener('click', () => { index += 1; render(); });
+        section.append(feedback, submit, next);
+        exercise.append(section);
+      }
+      document.querySelectorAll('[data-alef-subject]').forEach(button => {
+        button.addEventListener('click', () => {
+          document.body.dataset.selectedSubject = button.dataset.alefSubject;
+          index = 0;
+          submissions = [];
+          render();
+        });
+      });
+    })();
+  </script>
+</body>
+</html>

@@ -1,0 +1,10 @@
+node_modules/
+.env
+.env.*
+!.env.example
+dist/
+test-results/
+playwright-report/
+*.log
+.DS_Store
+.alef-assistant/

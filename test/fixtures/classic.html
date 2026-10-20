@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>اختبار محلي — واجهة المهام المسندة</title>
+  <style>
+    body{font:16px/1.7 system-ui;max-width:1000px;margin:25px auto;padding:16px}
+    button{font:inherit;margin:6px;padding:8px 12px;cursor:pointer}
+    main>section,article{padding:18px;border:1px solid #ddd;margin:12px 0}
+    h3{margin:0;font-size:18px}.invisible{visibility:hidden}[hidden]{display:none!important}
+    [data-testid$="activity-card-navigate"]{border:1px solid #ddd;padding:12px;margin:8px 0}
+    .line-clamp-2{max-width:500px}.thumbnail{width:100px;height:40px;background:#e7f4f0}
+  </style>
+</head>
+<body>
+<p>Fixture محلية مصطنعة؛ عناصر الكتالوج من ملفات ألف العامة، والأسئلة من مزوّد اختبار.</p>
+<main></main>
+<script>
+(()=>{
+  const scenario=new URLSearchParams(location.search).get('scenario')||'normal';
+  const main=document.querySelector('main');
+  const lessons=[
+    {id:'done',title:'1. درس مكتمل سابقًا',completed:true},
+    {id:'polynomials',title:'2. Adding and Subtracting Polynomials'},
+    {id:'dilations',title:'45. Dilations - Exit Ticket',overdue:true},
+    {id:'arabic',title:'٣. مراجعة الأشكال باللغة العربية'},
+  ];
+  const state={actions:[],completed:[],submissions:[],tab:null,filter:'todo',limit:2,lesson:null,step:0};
+  const record=(kind,values={})=>state.actions.push({kind,...values});
+  const el=(tag,label,attrs={})=>{
+    const node=document.createElement(tag);if(label)node.textContent=label;
+    for(const[key,value]of Object.entries(attrs))node.setAttribute(key,value);return node;
+  };
+  const button=(label,testId,fn,attrs={})=>{
+    const node=el('button',label,{type:'button',...(testId?{'data-testid':testId}:{}),...attrs});
+    node.onclick=fn;return node;
+  };
+  const isDone=lesson=>lesson.completed||state.completed.includes(lesson.id);
+  function tabs(tab){
+    const nav=el('nav','',{'aria-label':'الدروس'});
+    for(const[id,label]of [['forYou','صفحتي'],['assigned','المهام المسندة'],['allLessons','جميع الدروس']]){
+      const testName={forYou:'foryou',assigned:'assigned',allLessons:'alllessons'}[id];
+      nav.append(button(label,`core-coursework-${testName}-tab-select`,()=>{
+        record('tab',{tab:id});state.limit=2;renderCatalog(id);
+      },{role:'tab','aria-selected':String(tab===id)}));
+    }
+    main.append(nav);
+  }
+  function assignedCard(lesson,tab){
+    const prefix=tab==='assigned'?'assigned':'foryou';
+    const card=el('div','',{'data-testid':`core-coursework-${prefix}-activity-card-navigate`,dir:'rtl'});
+    card.append(el('div','',{class:'thumbnail'}),el('h3',lesson.title,{dir:'ltr'}));
+    card.append(el('span',lesson.overdue?'متأخرة':'مهمة مسندة إليّ 1',{'data-testid':lesson.overdue?'assigned-item-due-tag':'assigned-item-count-tag'}));
+    const open=target=>{record('lesson',{id:lesson.id,target});state.lesson=lesson.id;state.step=0;renderInstruction();};
+    card.onclick=()=>open('card');
+    const label=isDone(lesson)?'مراجعة':lesson.id==='polynomials'?'استمرار':'بدء';
+    card.append(button(label,`core-coursework-${prefix}-activity-btn-navigate`,event=>{event.stopPropagation();open('button');}));
+    return card;
+  }
+  function renderCatalog(tab='forYou'){
+    state.tab=tab;
+    history.replaceState(null,'',`#/classes/test-class?tab=${tab}`);
+    main.replaceChildren(el('header','Math'));
+    tabs(tab);
+    if(tab==='allLessons'){renderAllLessonCards();return;}
+    const panel=el('section','',{'data-testid':tab==='assigned'?'assigned-tab':'assigned-tasks-panel'});
+    if(tab==='assigned'){
+      const filters=el('div','',{'data-testid':'assigned-filters'});
+      for(const[id,label]of [['all','جميع المهام'],['todo','المطلوبة'],['overdue','المتأخرة'],['completed','المكتملة']]){
+        filters.append(button(label,`core-coursework-assigned-${id}-chip-filter`,()=>{
+          record('filter',{filter:id});state.filter=id;state.limit=2;renderCatalog('assigned');
+        },{'aria-pressed':String(state.filter===id)}));
+      }
+      panel.append(filters);
+    }else{
+      const heading=el('div','',{'data-testid':'assigned-tasks-panel-header'});
+      heading.append(el('h2','آخر المهام المسندة إليّ'),button('إظهار الكل','core-coursework-foryou-viewall-btn-navigate',()=>{
+        record('viewAll');state.limit=2;renderCatalog('assigned');
+      }));panel.append(heading);
+    }
+    const shown=tab==='forYou'&&scenario==='empty-home'?[]:lessons.filter(lesson=>{
+      if(tab!=='assigned'||state.filter==='all')return true;
+      if(state.filter==='completed')return isDone(lesson);
+      if(state.filter==='overdue')return lesson.overdue&&!isDone(lesson);
+      return !lesson.overdue&&!isDone(lesson);
+    });
+    const list=el('div','',{'data-testid':tab==='assigned'?'assigned-tab-list':'assigned-tasks-list'});
+    for(const lesson of shown.slice(0,state.limit)){
+      list.append(assignedCard(lesson,tab));
+      if(scenario==='duplicates'&&lesson.id==='polynomials')list.append(assignedCard(lesson,tab));
+    }
+    panel.append(list);
+    if(state.limit<shown.length){
+      panel.append(button('إظهار المزيد',`core-coursework-${tab==='assigned'?'assigned':'foryou'}-showmore-btn-expand`,()=>{
+        record('expand',{tab});setTimeout(()=>{state.limit+=1;renderCatalog(tab);},40);
+      }));
+    }
+    main.append(panel);
+  }
+  function renderAllLessonCards(){
+    const list=el('section','');
+    for(const lesson of [lessons[0],lessons[1],{id:'locked',title:'4. نشاط لم يُنشر بعد',locked:true}]){
+      const card=el('div','',{'data-testid':'core-coursework-alllessons-activity-card-navigate',class:lesson.locked?'cursor-default opacity-60':'cursor-pointer'});
+      const thumbnail=el('div','',{class:'thumbnail','aria-label':lesson.title+' activity thumbnail'});
+      if(lesson.locked){
+        const icon=document.createElementNS('http://www.w3.org/2000/svg','svg');icon.setAttribute('data-testid','lock-icon');icon.setAttribute('width','20');icon.setAttribute('height','20');thumbnail.append(icon);
+      }
+      card.append(thumbnail,el('div',lesson.title,{class:'body-lg-regular text-text-100 line-clamp-2',dir:'ltr'}));
+      if(lesson.locked)card.append(el('div','Coming Soon'));
+      const action=el('div','',{class:lesson.locked?'invisible':''});
+      action.append(el('div',isDone(lesson)?'Review':'Start',{class:'body-md-light text-subject-color-160'}));card.append(action);
+      card.onclick=()=>{record('lesson',{id:lesson.id,target:'allLessonsCard'});if(!lesson.locked){state.lesson=lesson.id;state.step=0;renderInstruction();}};
+      list.append(card);
+    }
+    main.append(list);
+  }
+  function back(){
+    return button('العودة للدروس',scenario==='ncle'?'ncle-sidebar-back':null,()=>{record('back',{lesson:state.lesson});state.limit=2;renderCatalog('forYou');});
+  }
+  function ncleShell(currentAssessment=false){
+    main.replaceChildren();
+    const shell=el('section','',{'data-testid':'ncle-activity-page'});
+    const sidebar=el('nav','',{'data-testid':'ncle-main-contents','aria-label':'NCLE activity components'});
+    for(const[id,title,locked]of [['learn','Learn',false],['locked','Exit Ticket',true],['practice','تحقق من فهمك',false]]){
+      const item=button('', 'ncle-component-item',()=>{
+        if(id==='practice'){record('instruction',{lesson:state.lesson,step:'component'});showSkipModal();}
+        else record('unexpected',{id});
+      },{class:locked?'text-primary-60':'text-primary-100',...((currentAssessment?id==='practice':id==='learn')?{'aria-current':'step'}:{})});
+      item.append(el('span',title,{dir:'ltr'}));sidebar.append(item);
+    }
+    const body=el('article','',{'data-testid':'ncle-fixture-body'});
+    shell.append(sidebar,body,back());main.append(shell);return body;
+  }
+  function showSkipModal(){
+    const modal=el('div','',{'data-testid':'skip-content-modal'});
+    modal.append(el('h2','هل تريد مغادرة الشرح؟'));
+    const leave=el('div','مغادرة',{'data-testid':'skip-content-modal-leave-button',class:'skip-content-modal__buttons__button--leave'});
+    leave.onclick=()=>{record('instruction',{lesson:state.lesson,step:'confirmSkip'});renderQuestion();};
+    modal.append(leave);main.append(modal);
+  }
+  function renderNcleInstruction(){
+    const body=ncleShell();
+    body.append(el('p','شرح تعليمي قبل أسئلة الدرس'));
+    body.append(button('Go to تحقق من فهمك','activity-navigation-bar__next-button',()=>{
+      record('instruction',{lesson:state.lesson,step:'nextComponent'});showSkipModal();
+    }));
+  }
+  function renderInstruction(){
+    history.replaceState(null,'',`#/lessons/${state.lesson}`);
+    if(scenario==='ncle'){renderNcleInstruction();return;}
+    main.replaceChildren(el('h1',lessons.find(item=>item.id===state.lesson)?.title));
+    const labels=['ابدأ','التالي','سأحاول لاحقًا'];
+    main.append(el('article','شرح تجريبي قبل الأسئلة'),button(labels[state.step],null,()=>{
+      record('instruction',{lesson:state.lesson,step:state.step,label:labels[state.step]});
+      state.step++;if(state.step===labels.length)renderQuestion();else renderInstruction();
+    }),back());
+  }
+  function renderQuestion(){
+    let body=main;
+    if(scenario==='ncle')body=ncleShell(true);else main.replaceChildren();
+    const question=el('section','',{'data-alef-question':state.lesson+'-question'});
+    question.append(el('h2','ما ناتج 6 × 7؟'));
+    for(const[id,label]of [['a','36'],['b','42']]){
+      const option=el('label','',{'data-alef-option':id});
+      option.append(el('input','',{type:'radio',name:'answer',value:id}),document.createTextNode(label));question.append(option);
+    }
+    question.append(button('إرسال الإجابة',null,()=>{
+      const selected=question.querySelector('input:checked')?.value;
+      state.submissions.push({lesson:state.lesson,selected});
+      if(selected!=='b')throw new Error('Fixture received an incorrect answer');
+      if(scenario==='ncle'){
+        record('sectionResult',{lesson:state.lesson});
+        body.replaceChildren(el('div','نتيجة قسم التقييم',{'data-testid':'ncle-assessment-result'}),button('إنهاء','activity-navigation-bar__finish-button',()=>{
+          record('finish',{lesson:state.lesson});state.completed.push(state.lesson);
+          main.replaceChildren();
+          const completion=el('section','',{'data-testid':'ncle-completion-page'});
+          const goBack=back();goBack.dataset.testid='ncle-completion-page-back';
+          completion.append(el('h1','انتهى نشاطك'),goBack);main.append(completion);
+        }));return;
+      }
+      state.completed.push(state.lesson);
+      main.replaceChildren(el('h1','أكملت الدرس بنجاح'),back());
+    }));body.append(question);
+  }
+  function showSubjects(){
+    history.replaceState(null,'','#/classes');
+    main.replaceChildren(button('الرياضيات',null,()=>{record('subject',{id:'math'});renderCatalog();},{'data-alef-subject':'math'}));
+  }
+  window.classicFixture={get state(){return structuredClone(state);},showAssigned(){state.filter='all';state.limit=100;renderCatalog('assigned');},showAllLessons(){renderCatalog('allLessons');},showUnknown(){
+    history.replaceState(null,'','#/account/preferences');main.replaceChildren(el('h1','Preferences'),button('Start',null,()=>record('unexpected')),button('Continue',null,()=>record('unexpected')));
+  }};
+  showSubjects();
+})();
+</script>
+</body>
+</html>

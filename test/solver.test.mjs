@@ -162,8 +162,57 @@ test('local Ollama uses the native non-streaming JSON protocol without an API ke
   assert.equal(requests[0].body.stream, false);
   assert.equal(requests[0].body.format, 'json');
   assert.equal(requests[0].body.think, false);
-  assert.deepEqual(requests[0].body.options, { temperature: 0, num_predict: 2048, num_ctx: 8192 });
+  assert.equal(requests[0].body.keep_alive, '15m');
+  assert.deepEqual(requests[0].body.options, { temperature: 0, num_predict: 512, num_ctx: 8192 });
   assert.equal(requests[1].body.messages.length, 2);
+});
+
+test('local single-pass solving sends one compact request and never claims independent verification', async () => {
+  const requests = [];
+  const result = await solveQuestion({ ...input, verify: false }, localConfig(async (_url, request) => {
+    requests.push(JSON.parse(request.body));
+    return localResponse({ ...answer, text: '' });
+  }));
+  assert.equal(requests.length, 1);
+  assert.equal(result.verified, false);
+  assert.equal(result.needsReview, false);
+  assert.deepEqual(result.answer.optionIds, ['a']);
+  assert.equal(requests[0].think, false);
+  assert.equal(requests[0].keep_alive, '15m');
+  assert.match(requests[0].messages[0].content, /one short Arabic sentence/);
+  assert.match(requests[0].messages[0].content, /keep text empty/);
+});
+
+test('local text answers retain their full response allowance and required content', async () => {
+  let requestBody;
+  const text = 'إجابة نصية كاملة '.repeat(100);
+  const result = await solveQuestion({ ...input, verify: false, question: {
+    id: 'essay', text: 'اكتب إجابة كاملة عن الموضوع.', type: 'text', options: [],
+  } }, localConfig(async (_url, request) => {
+    requestBody = JSON.parse(request.body);
+    return localResponse({ ...answer, optionIds: [], text });
+  }));
+  assert.equal(requestBody.options.num_predict, 2048);
+  assert.equal(result.answer.text, text.trim());
+  assert.match(requestBody.messages[0].content, /complete requested answer in text/);
+});
+
+test('local output budget expands for a complete 20-pair mapping with long original IDs', async () => {
+  const items = Array.from({ length: 20 }, (_, i) => ({ id: `item-${i}-` + 'i'.repeat(118), text: `عنصر ${i}` }));
+  const targets = Array.from({ length: 20 }, (_, i) => ({ id: `target-${i}-` + 't'.repeat(117), text: `هدف ${i}` }));
+  const matches = items.map((item, index) => ({ itemId: item.id, targetId: targets[index].id }));
+  let requestBody;
+  const result = await solveQuestion({ ...input, verify: false, question: {
+    id: 'large-mapping', text: 'صل كل عنصر بهدفه.', type: 'matching', options: [], items, targets,
+  } }, localConfig(async (_url, request) => {
+    requestBody = JSON.parse(request.body);
+    return localResponse({ ...answer, optionIds: [], text: '', matches });
+  }));
+  assert.ok(requestBody.options.num_predict > 2048);
+  assert.ok(requestBody.options.num_predict <= 8192);
+  assert.ok(requestBody.options.num_predict >= Buffer.byteLength(JSON.stringify(matches)));
+  assert.deepEqual(result.answer.matches, matches);
+  assert.equal(result.needsReview, false);
 });
 
 test('a stopped local runtime has a precise error and never asks for a paid key', async () => {

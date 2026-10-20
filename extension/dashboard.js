@@ -8,7 +8,7 @@ let selectedSubject = null;
 let subjects = [];
 let running = false;
 let connected = false;
-let config = {serverUrl:DEFAULT_URL,token:'',verify:true,autoSubmit:true,skipInstruction:true,selectors:{}};
+let config = {serverUrl:DEFAULT_URL,token:'',verify:false,autoSubmit:true,skipInstruction:true,selectors:{}};
 let startedAt = null;
 let eventCount = 0;
 let lessonQueue = [];
@@ -27,6 +27,11 @@ function setBadge(text, kind = 'neutral') {
   const badge = $('connection-badge');
   badge.className = `badge ${kind}`;
   badge.replaceChildren(document.createElement('i'), document.createTextNode(text));
+}
+function updateSolveMode() {
+  $('solve-mode').textContent = $('verify').checked
+    ? 'التحقّق الإضافي مفعّل: حلّان مستقلان لكل سؤال؛ يحتاج وقتًا إضافيًا.'
+    : 'الوضع السريع مفعّل: حل واحد لكل سؤال. فعّل التحقّق لإضافة حل ثانٍ مستقل يحتاج وقتًا إضافيًا.';
 }
 function updateButtons() {
   $('start').disabled = !connected || !selectedSubject || running;
@@ -262,7 +267,8 @@ async function init() {
   if(typeof chrome==='undefined'||!chrome.runtime?.id){notice('هذه واجهة إضافة Chrome. ثبّت مجلد extension، ثم افتح مُعين من شريط الإضافات.',true);return;}
   const [local,session]=await Promise.all([chrome.storage.local.get('alefConfig'),chrome.storage.session.get('alefPairingToken')]);
   config={...config,...local.alefConfig,token:session.alefPairingToken||''};
-  $('verify').checked=config.verify!==false;$('auto-submit').checked=config.autoSubmit!==false;
+  $('verify').checked=config.verify===true;$('auto-submit').checked=config.autoSubmit!==false;
+  updateSolveMode();
   $('skip-instruction').checked=config.skipInstruction!==false;
   if(tabId!==null){try{const result=await message('GET_STATE');restoreState(result.state);}catch{}}
   chrome.runtime.onMessage.addListener(message=>{if(message.type==='RUN_EVENT'&&message.tabId===tabId)applyEvent(message.event);});
@@ -270,6 +276,7 @@ async function init() {
   $('diagnostics').addEventListener('click',exportDiagnostics);
   $('open-alef').addEventListener('click',async()=>{const tab=await chrome.tabs.create({url:WEBSITE});tabId=tab.id;});
   $('start').addEventListener('click',start);
+  $('verify').addEventListener('change',updateSolveMode);
   $('stop').addEventListener('click',async()=>{try{await message('STOP');}catch(error){notice(error.message,true);}});
   document.querySelectorAll('.settings-trigger').forEach(button=>button.addEventListener('click',openSettings));
   $('close-settings').addEventListener('click',()=>$('settings-dialog').close());

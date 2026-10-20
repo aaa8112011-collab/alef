@@ -9,8 +9,8 @@ import {chromium} from 'playwright';
 const root=new URL('../',import.meta.url);
 const config=()=>({serverUrl:'http://127.0.0.1:4318',token:'test-only-local-token',verify:true,autoSubmit:true,minConfidence:.85});
 
-async function harness(t,scenario='normal'){
-  const fixture=await readFile(new URL('test/fixtures/course.html',root));
+async function harness(t,scenario='normal',fixtureName='course'){
+  const fixture=await readFile(new URL(`test/fixtures/${fixtureName}.html`,root));
   const script=await readFile(new URL('extension/content.js',root),'utf8');
   const server=createServer((_req,res)=>{res.writeHead(200,{'Content-Type':'text/html; charset=utf-8'});res.end(fixture);});
   await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(0,'127.0.0.1',resolve);});
@@ -241,4 +241,176 @@ test('wrong-answer feedback uses a bounded explicit retry and never resubmits th
  });
  let calls=0;const worker=await runCourse(h,(_url,options)=>{const body=JSON.parse(options.body);calls++;if(calls===2)assert.ok(body.question.text.includes('previous answers'));return Promise.resolve(Response.json({answer:{optionIds:[calls===1?'a':'b'],text:calls===1?'36':'42',explanation:'مزود اختبار',confidence:.99},verified:true,needsReview:false}));});
  await waitFor(()=>complete(worker),()=>JSON.stringify(worker.events));const actual=await h.page.evaluate(()=>window.retryState);assert.deepEqual(actual.submitted,['a','b']);assert.equal(actual.retryClicks,1);assert.equal(calls,2);
+});
+
+for(const scenario of ['normal','empty-home']){
+  test(`classic hash-route coursework opens assigned lessons, includes overdue work and expands lazy pages (${scenario})`,async t=>{
+    const h=await harness(t,scenario,'classic');let calls=0;
+    const worker=await runCourse(h,(url,options)=>{calls++;return provider(url,options);});
+    await waitFor(()=>complete(worker),()=>JSON.stringify(worker.events));
+    const state=(await worker.send({type:'GET_STATE'})).state;
+    const actual=await h.page.evaluate(()=>window.classicFixture.state);
+    assert.deepEqual(actual.completed,['polynomials','dilations','arabic']);
+    assert.deepEqual(actual.actions.filter(item=>item.kind==='lesson').map(item=>[item.id,item.target]),[
+      ['polynomials','button'],['dilations','button'],['arabic','button'],
+    ],'Only the child Start/Continue controls for unfinished work should be clicked');
+    assert.equal(calls,3);assert.equal(actual.submissions.length,3);
+    assert.ok(actual.submissions.every(item=>item.selected==='b'));
+    assert.ok(actual.actions.some(item=>item.kind==='tab'&&item.tab==='assigned'));
+    assert.ok(actual.actions.some(item=>item.kind==='filter'&&item.filter==='all'),'ALL must include overdue tasks that TODO omits');
+    assert.ok(actual.actions.filter(item=>item.kind==='expand'&&item.tab==='assigned').length>=2);
+    assert.equal(actual.actions.filter(item=>item.kind==='instruction').length,9);
+    assert.equal(actual.actions.filter(item=>item.kind==='instruction'&&item.label==='سأحاول لاحقًا').length,3);
+    assert.equal(state.stats.lessonsCompleted,3);assert.equal(state.stats.lessonsTotal,3);
+    assert.equal(state.queue.filter(item=>item.status==='alreadycompleted').length,1);
+    assert.match(state.catalogURL,/#\/classes\/test-class\?tab=assigned$/);
+  });
+}
+
+test('classic responsive duplicates retain one lesson identity before and after a rescan',async t=>{
+  const h=await harness(t,'duplicates','classic');
+  await h.page.evaluate(()=>window.classicFixture.showAssigned());
+  const first=await h.send({type:'ALEF_SCAN'});
+  const second=await h.send({type:'ALEF_INSPECT'});
+  assert.equal(first.stage,'lessons');
+  assert.equal(first.lessons.length,4,JSON.stringify(first.lessons));
+  assert.equal(first.lessons.filter(item=>item.name==='2. Adding and Subtracting Polynomials').length,1);
+  assert.deepEqual(second.lessons,first.lessons);
+  const done=first.lessons.find(item=>item.name.includes('مكتمل سابقًا'));
+  assert.ok(done?.completed,'The real Review action indicates previously completed work');
+  const result=await h.send({type:'ALEF_OPEN_LESSON',lessonId:done.id,fingerprint:second.fingerprint});
+  assert.equal(result.ok,false);
+  assert.deepEqual((await h.page.evaluate(()=>window.classicFixture.state)).actions,[]);
+});
+
+test('classic all-lessons cards preserve source lock and review states without opening unavailable content',async t=>{
+  const h=await harness(t,'normal','classic');
+  await h.page.evaluate(()=>window.classicFixture.showAllLessons());
+  const snapshot=await h.send({type:'ALEF_SCAN'});
+  assert.equal(snapshot.stage,'lessons');assert.equal(snapshot.lessons.length,3,JSON.stringify(snapshot));
+  const locked=snapshot.lessons.find(item=>item.name.includes('لم يُنشر'));
+  const done=snapshot.lessons.find(item=>item.name.includes('مكتمل سابقًا'));
+  const open=snapshot.lessons.find(item=>item.name.includes('Polynomials'));
+  assert.ok(locked?.locked,'The public all-lessons card lock-icon prevents opening');
+  assert.ok(done?.completed,'A visible Review action is completed, not pending');
+  for(const lesson of [locked,done])assert.equal((await h.send({type:'ALEF_OPEN_LESSON',lessonId:lesson.id})).ok,false);
+  assert.deepEqual((await h.page.evaluate(()=>window.classicFixture.state)).actions,[]);
+  assert.equal((await h.send({type:'ALEF_OPEN_LESSON',lessonId:open.id})).ok,true);
+  assert.deepEqual((await h.page.evaluate(()=>window.classicFixture.state)).actions,[{kind:'lesson',id:'polynomials',target:'allLessonsCard'}]);
+});
+
+test('generic Start and Continue outside a recognized hash-route lesson are never catalog or player actions',async t=>{
+  const h=await harness(t,'normal','classic');
+  await h.page.evaluate(()=>window.classicFixture.showUnknown());
+  const snapshot=await h.send({type:'ALEF_SCAN'});
+  assert.equal(snapshot.stage,'unknown');assert.deepEqual(snapshot.subjects,[]);assert.deepEqual(snapshot.lessons,[]);
+  assert.equal(snapshot.navigation.some(item=>['next','catalog','expand','assessment','skip'].includes(item.kind)),false);
+  assert.deepEqual((await h.page.evaluate(()=>window.classicFixture.state)).actions,[]);
+});
+
+test('classic NCLE workflow skips only accessible teaching sections and finishes after component results',async t=>{
+  const h=await harness(t,'ncle','classic');
+  const worker=await runCourse(h);
+  await waitFor(()=>complete(worker),()=>JSON.stringify(worker.events));
+  const actual=await h.page.evaluate(()=>window.classicFixture.state);
+  assert.deepEqual(actual.completed,['polynomials','dilations','arabic']);
+  assert.equal(actual.submissions.length,3);
+  assert.equal(actual.actions.filter(item=>item.kind==='sectionResult').length,3);
+  assert.equal(actual.actions.filter(item=>item.kind==='finish').length,3,'An assessment section result must not prematurely finish its lesson');
+  assert.deepEqual(actual.actions.filter(item=>item.kind==='instruction').map(item=>item.step),[
+    'component','confirmSkip','component','confirmSkip','component','confirmSkip',
+  ]);
+  assert.equal(actual.actions.some(item=>item.kind==='unexpected'),false,'Current, locked and already selected assessment components must remain untouched');
+  assert.equal((await worker.send({type:'GET_STATE'})).state.stats.lessonsCompleted,3);
+});
+
+test('NCLE navigation recognizes named component next, div skip confirmation and lockscreen restrictions',async t=>{
+  const h=await harness(t);
+  await h.page.evaluate(()=>{
+    history.replaceState(null,'','#/progress/lesson-activity');
+    document.querySelector('main').innerHTML='<section data-testid="ncle-activity-page"><nav data-testid="ncle-main-contents"><button data-testid="ncle-component-item" aria-current="step" class="text-subject-color-160"><span dir="ltr">Learn</span></button><button data-testid="ncle-component-item" class="text-primary-60"><span dir="ltr">Exit Ticket</span></button><button data-testid="ncle-component-item" class="text-primary-100"><span dir="ltr">Check My Understanding</span></button></nav><button data-testid="activity-navigation-bar__next-button">Go to Vocabulary</button><div data-testid="skip-content-modal-leave-button">مغادرة</div><button data-testid="ncle-sidebar-back">المادة</button></section>';
+  });
+  let snapshot=await h.send({type:'ALEF_SCAN'});
+  assert.equal(snapshot.stage,'instruction');
+  assert.equal(snapshot.navigation.filter(item=>item.kind==='assessment').length,1);
+  assert.equal(snapshot.navigation.find(item=>item.kind==='assessment')?.label,'Check My Understanding');
+  assert.equal(snapshot.navigation.some(item=>item.kind==='assessment'&&item.label==='Exit Ticket'),false);
+  assert.equal(snapshot.navigation.find(item=>item.id==='activity-navigation-bar__next-button')?.kind,'next');
+  assert.equal(snapshot.navigation.find(item=>item.id==='skip-content-modal-leave-button')?.kind,'skip');
+  await h.page.evaluate(()=>{
+    const locked=document.createElement('div');locked.dataset.testid='ncle-lock-screen';locked.textContent='هذا المحتوى غير متاح';document.querySelector('main').append(locked);
+  });
+  snapshot=await h.send({type:'ALEF_INSPECT'});
+  assert.ok(snapshot.navigation.length>0);
+  assert.ok(snapshot.navigation.every(item=>item.kind==='back'),'A lockscreen must never expose next/skip/assessment actions');
+});
+
+test('final regression: expired login on a stale classic class route exposes no subject or navigation',async t=>{
+  const h=await harness(t,'normal','classic');
+  await h.page.evaluate(()=>{
+    history.replaceState(null,'','#/classes/test-class?tab=assigned');
+    document.querySelector('main').innerHTML='<form><h1>تسجيل الدخول</h1><input type="password" aria-label="كلمة المرور"><button>دخول</button></form><button data-testid="core-coursework-assigned-tab-select">المهام المسندة</button>';
+  });
+  const snapshot=await h.send({type:'ALEF_SCAN'});
+  assert.equal(snapshot.stage,'unknown');
+  assert.deepEqual(snapshot.subjects,[]);assert.deepEqual(snapshot.lessons,[]);assert.deepEqual(snapshot.navigation,[]);
+  assert.ok(snapshot.diagnostics.some(item=>item.includes('تسجيل الدخول')));
+});
+
+test('final regression: a Learn teaching question skips only to an available assessment and never overrides Arabic current or locked states',async t=>{
+  const h=await harness(t);
+  await h.page.evaluate(()=>{
+    history.replaceState(null,'','#/progress/ncle/class/test-class/activity/test-activity');
+    document.querySelector('main').innerHTML='<section data-testid="ncle-activity-page"><nav data-testid="ncle-main-contents"><button id="learn" data-testid="ncle-component-item" aria-current="step" class="text-primary-100"><span dir="ltr">Learn</span></button><button id="locked" data-testid="ncle-component-item" class="text-primary-60"><span dir="ltr">اختبر فهمك</span></button><button id="available" data-testid="ncle-component-item" class="text-primary-100"><span dir="ltr">تحقق من فهمك</span></button></nav><article data-testid="ncle-activity-page-player"><section data-alef-question="teaching-question"><h2>ما ناتج 6 × 7؟</h2><label data-alef-option="a"><input type="radio" name="q">36</label><label data-alef-option="b"><input type="radio" name="q">42</label><button>إرسال الإجابة</button></section></article></section>';
+  });
+  let snapshot=await h.send({type:'ALEF_SCAN'});
+  assert.equal(snapshot.stage,'instruction','A supported teaching question must not block the available skip to the main assessment');
+  assert.deepEqual(snapshot.navigation.filter(item=>item.kind==='assessment').map(item=>item.id),['available']);
+  await h.page.evaluate(()=>{
+    document.querySelector('#learn').removeAttribute('aria-current');document.querySelector('#available').setAttribute('aria-current','step');
+  });
+  snapshot=await h.send({type:'ALEF_INSPECT'});
+  assert.equal(snapshot.stage,'question','Once the assessment is selected, solve it instead of navigating away');
+  assert.equal(snapshot.navigation.some(item=>item.kind==='assessment'),false,'The current Arabic title and locked exact-label match must not fall through generic assessment recognition');
+  await h.page.evaluate(()=>{
+    document.querySelector('#available').removeAttribute('aria-current');document.querySelector('#available').className='text-primary-60';document.querySelector('#learn').setAttribute('aria-current','step');
+  });
+  snapshot=await h.send({type:'ALEF_INSPECT'});
+  assert.equal(snapshot.stage,'question');assert.equal(snapshot.navigation.some(item=>item.kind==='assessment'),false);
+});
+
+test('final regression: changing classic class during a pending model response stops before any answer or next lesson',async t=>{
+  const h=await harness(t,'normal','classic');let requested=false;let release;
+  const worker=await runCourse(h,(url,options)=>{
+    requested=true;return new Promise(resolve=>{release=()=>resolve(provider(url,options));});
+  });
+  await waitFor(()=>requested,'The selected class must reach a pending model request');
+  const opened=(await h.page.evaluate(()=>window.classicFixture.state)).actions.filter(item=>item.kind==='lesson');
+  assert.equal(opened.length,1);
+  await h.page.evaluate(()=>history.replaceState(null,'','#/classes/other-class?tab=assigned'));
+  release();
+  await waitFor(()=>worker.events.some(item=>item.event?.kind==='error'),()=>JSON.stringify(worker.events));
+  const actual=await h.page.evaluate(()=>window.classicFixture.state);
+  assert.deepEqual(actual.submissions,[]);assert.deepEqual(actual.completed,[]);
+  assert.deepEqual(actual.actions.filter(item=>item.kind==='lesson'),opened);
+  const state=(await worker.send({type:'GET_STATE'})).state;
+  assert.equal(state.running,false);assert.equal(state.stats.solved,0);
+  assert.match(worker.events.findLast(item=>item.event?.kind==='error').event.message,/مادة أخرى|تغيرت المادة/);
+});
+
+test('final regression: starting on All Lessons still chooses Assigned ALL and includes overdue tasks',async t=>{
+  const h=await harness(t,'normal','classic');
+  await h.page.evaluate(()=>window.classicFixture.showAllLessons());
+  const worker=await bridge(h,provider);
+  const connection=await worker.send({type:'CONNECT'});
+  assert.equal(connection.ok,true,JSON.stringify(connection));assert.ok(connection.subjects.length);
+  const start=await worker.send({type:'START',subjectId:connection.subjects[0].id,config:config()});
+  assert.equal(start.ok,true,JSON.stringify(start));
+  await waitFor(()=>complete(worker),()=>JSON.stringify(worker.events));
+  const actual=await h.page.evaluate(()=>window.classicFixture.state);
+  assert.deepEqual(actual.completed,['polynomials','dilations','arabic']);
+  assert.ok(actual.actions.some(item=>item.kind==='tab'&&item.tab==='assigned'));
+  assert.ok(actual.actions.some(item=>item.kind==='filter'&&item.filter==='all'));
+  assert.equal(actual.actions.some(item=>item.kind==='lesson'&&item.target==='allLessonsCard'),false,'All Lessons can be restricted to the current term; it must not become the incomplete homework queue');
+  assert.equal((await worker.send({type:'GET_STATE'})).state.stats.lessonsCompleted,3);
 });

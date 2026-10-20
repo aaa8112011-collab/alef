@@ -10,7 +10,7 @@ const root = new URL('../',import.meta.url);
 // Explicit UI-only Chrome API stub. Native unpacked MV3 loading is blocked by
 // this cloud image's managed ExtensionInstallBlocklist; this harness does not
 // change that policy or claim to exercise Chrome's native permission prompt.
-async function dashboardHarness({connected=false}={}) {
+async function dashboardHarness({connected=false,savedConfig=null}={}) {
   const resources = new Map(await Promise.all(['dashboard.html','dashboard.css','dashboard.js'].map(async name=>[name,await readFile(new URL(`extension/${name}`,root))])));
   const server=createServer((request,response)=>{
     const name=new URL(request.url,'http://127.0.0.1').pathname.slice(1);
@@ -28,12 +28,12 @@ async function dashboardHarness({connected=false}={}) {
     const errors=[];
     page.on('pageerror',error=>errors.push(error.message));
     page.on('console',entry=>{if(entry.type()==='error'&&/content security policy|refused to/i.test(entry.text()))errors.push(entry.text());});
-    await page.addInitScript(({connected})=>{
+    await page.addInitScript(({connected,savedConfig})=>{
       const state={running:false,status:'idle',page:connected?{title:'صفحة اختبار محلية — الرياضيات',url:'http://127.0.0.1/fixture'}:null,
         subjects:connected?[{id:'math',name:'الرياضيات'},{id:'science',name:'العلوم'},{id:'arabic',name:'اللغة العربية'}]:[],
         subjectId:null,stats:{solved:0,review:0,total:0},events:[],lastEvent:null};
       const listeners=[];
-      const local={},session={alefPairingToken:'ui-test-pairing-token-not-a-real-secret'};
+      const local=savedConfig?{alefConfig:savedConfig}:{},session={alefPairingToken:'ui-test-pairing-token-not-a-real-secret'};
       globalThis.__uiTest={state,local,session,messages:[],permissions:[],listeners,
         emit(event){listeners.forEach(listener=>listener({type:'RUN_EVENT',tabId:1,event}));}};
       const storage=store=>({async get(key){return {[key]:store[key]};},async set(value){Object.assign(store,value);}});
@@ -56,7 +56,7 @@ async function dashboardHarness({connected=false}={}) {
         permissions:{async request(value){globalThis.__uiTest.permissions.push(value);return true;}},
         tabs:{async get(){return {id:1,url:'https://moe.alefed.com/'};},async query(){return [{id:1,url:'https://moe.alefed.com/'}];},async create(){return {id:1};}},
       };
-    },{connected});
+    },{connected,savedConfig});
     await page.goto(`http://127.0.0.1:${server.address().port}/dashboard.html?tabId=1`);
     await page.waitForFunction(()=>globalThis.__uiTest.listeners.length>0);
     return {page,errors,async close(){await browser.close();await new Promise(resolve=>server.close(resolve));}};
@@ -121,6 +121,10 @@ test('dashboard subject choice, start/stop, event rendering and permission reque
     await page.locator('#subjects button').first().click();
     assert.equal(await page.locator('#start').isEnabled(),true);
     await capture(page,'dashboard-fixture');
+    assert.equal(await page.locator('#verify').isChecked(),false);
+    assert.ok((await page.locator('#solve-mode').textContent()).includes('الوضع السريع'));
+    await page.locator('label').filter({has:page.locator('#verify')}).click();
+    assert.ok((await page.locator('#solve-mode').textContent()).includes('حلّان مستقلان'));
     await page.locator('#start').click();
     await page.waitForFunction(()=>__uiTest.messages.some(message=>message.type==='START'));
     assert.equal(await page.locator('#stop').isEnabled(),true);
@@ -128,6 +132,7 @@ test('dashboard subject choice, start/stop, event rendering and permission reque
     assert.equal(await page.locator('#connect').isDisabled(),true);
     const start=await page.evaluate(()=>__uiTest.messages.find(message=>message.type==='START'));
     assert.equal(start.subjectId,'math');assert.equal(start.config.verify,true);assert.equal(start.config.autoSubmit,true);
+    await page.waitForFunction(()=>__uiTest.local.alefConfig?.verify===true);
     await page.evaluate(()=>__uiTest.emit({kind:'answer',message:'وصلت إجابة تجريبية.',timestamp:Date.now(),stats:{solved:1,review:0,total:1},
       question:{text:'ما ناتج 6 × 7؟',options:[{id:'b',text:'42'}]},answer:{optionIds:['b'],text:'42',explanation:'6 × 7 = 42',confidence:.97}}));
     assert.equal(await page.locator('#question-text').textContent(),'ما ناتج 6 × 7؟');
@@ -187,4 +192,56 @@ test('course queue and nonblocking lesson review retain automatic run controls',
   assert.equal(await page.locator('#stop').isEnabled(),true);assert.equal(await page.locator('#start').isDisabled(),true);assert.equal(await page.locator('#skip-instruction').isDisabled(),true);
   assert.deepEqual(harness.errors,[]);
  }finally{await harness.close();}
+});
+
+
+test('fresh dashboard starts in fast mode and persists one-response selection without credentials',async()=>{
+  const harness=await dashboardHarness({connected:true});
+  try{
+    const {page}=harness;
+    assert.equal(await page.locator('#verify').isChecked(),false);
+    assert.ok((await page.locator('#solve-mode').textContent()).includes('حل واحد لكل سؤال'));
+    await page.locator('#subjects button').first().click();
+    await page.locator('#start').click();
+    await page.waitForFunction(()=>__uiTest.local.alefConfig?.verify===false);
+    const state=await page.evaluate(()=>({start:__uiTest.messages.find(message=>message.type==='START'),stored:__uiTest.local.alefConfig}));
+    assert.equal(state.start.config.verify,false);
+    assert.equal(state.stored.verify,false);
+    assert.equal('token' in state.stored,false);
+    assert.equal(await page.locator('#verify').isDisabled(),true);
+    assert.deepEqual(harness.errors,[]);
+  }finally{await harness.close();}
+});
+
+for(const verify of [true,false]) {
+  test(`saved verification preference ${verify} survives reopening and starts unchanged`,async()=>{
+    const harness=await dashboardHarness({connected:true,savedConfig:{verify,autoSubmit:true,skipInstruction:true}});
+    try{
+      const {page}=harness;
+      assert.equal(await page.locator('#verify').isChecked(),verify);
+      assert.ok((await page.locator('#solve-mode').textContent()).includes(verify?'حلّان مستقلان':'الوضع السريع'));
+      await page.locator('#subjects button').first().click();
+      await page.locator('#start').click();
+      await page.waitForFunction(()=>__uiTest.messages.some(message=>message.type==='START'));
+      assert.equal(await page.evaluate(()=>__uiTest.messages.find(message=>message.type==='START').config.verify),verify);
+      assert.deepEqual(harness.errors,[]);
+    }finally{await harness.close();}
+  });
+}
+
+
+test('existing verified mode can be switched to fast mode and persists the new selection',async()=>{
+  const harness=await dashboardHarness({connected:true,savedConfig:{verify:true}});
+  try{
+    const {page}=harness;
+    assert.equal(await page.locator('#verify').isChecked(),true);
+    await page.locator('label').filter({has:page.locator('#verify')}).click();
+    assert.equal(await page.locator('#verify').isChecked(),false);
+    assert.ok((await page.locator('#solve-mode').textContent()).includes('الوضع السريع'));
+    await page.locator('#subjects button').first().click();
+    await page.locator('#start').click();
+    await page.waitForFunction(()=>__uiTest.local.alefConfig?.verify===false);
+    assert.equal(await page.evaluate(()=>__uiTest.messages.find(message=>message.type==='START').config.verify),false);
+    assert.deepEqual(harness.errors,[]);
+  }finally{await harness.close();}
 });

@@ -1,7 +1,7 @@
 (() => {
   'use strict';
-  if (globalThis.__alefAssistantInstalled==='0.3.0') return;
-  globalThis.__alefAssistantInstalled = '0.3.0';
+  if (globalThis.__alefAssistantInstalled==='0.4.0') return;
+  globalThis.__alefAssistantInstalled = '0.4.0';
 
   let selectors = {};
   let subjects = new Map();
@@ -105,16 +105,50 @@
     selectors = {...selectors, ...next};
   }
   const SUBJECT_CARDS = '[data-testid="subject-card"],[data-alef-subject],[data-subject-id],[data-testid*="subject-card" i],[data-testid*="course-card" i],[data-cy*="subject-card" i],.subject-card,.course-card,[class*="subjectCard"],[class*="courseCard"],app-subject-card';
-  const LESSON_CARDS = '[data-testid^="level-card-container-"],[data-alef-lesson],[data-lesson-id],[data-activity-id],[data-testid="lesson-card"],[data-testid="lesson-item"],[data-testid="activity-card"],[data-testid="assignment-card"],.lesson-card,.lesson-item,.activity-card,[class*="lessonCard"],[class*="lessonItem"],ul[aria-label="SkillList"] li[aria-label="Skill"]';
+  const CORE_LESSON_CARDS = '[data-testid="core-coursework-foryou-activity-card-navigate"],[data-testid="core-coursework-assigned-activity-card-navigate"],[data-testid="core-coursework-alllessons-activity-card-navigate"]';
+  const CORE_LESSON_BUTTONS = '[data-testid="core-coursework-foryou-activity-btn-navigate"],[data-testid="core-coursework-assigned-activity-btn-navigate"]';
+  const CORE_CATALOG_TABS = '[data-testid="core-coursework-foryou-tab-select"],[data-testid="core-coursework-assigned-tab-select"],[data-testid="core-coursework-alllessons-tab-select"]';
+  const LESSON_CARDS = CORE_LESSON_CARDS+', [data-testid^="level-card-container-"],[data-alef-lesson],[data-lesson-id],[data-activity-id],[data-testid="lesson-card"],[data-testid="lesson-item"],[data-testid="activity-card"],[data-testid="assignment-card"],.lesson-card,.lesson-item,.activity-card,[class*="lessonCard"],[class*="lessonItem"],ul[aria-label="SkillList"] li[aria-label="Skill"]';
   const SUBJECT_NAMES = ['الرياضيات','رياضيات','العلوم','علوم','اللغة العربية','العربية','عربي','اللغة الانجليزية','اللغة الانكليزية','انجليزي','الدراسات الاجتماعية','الاجتماعيات','التربية الاسلامية','الدراسات الاسلامية','الفيزياء','الكيمياء','الاحياء','علوم الحاسوب','الحوسبة','اللغة الفرنسية','mathematics','math','maths','science','arabic','arabic language','english','english language','social studies','islamic education','islamic studies','physics','chemistry','biology','computer science','french'].map(norm);
   function loginPage() {return all('input[type="password"],form[data-testid*="login" i],form[id*="login" i]').length>0;}
   function catalogAncestor(node) {return !!node.closest(`${SUBJECT_CARDS},${LESSON_CARDS}`);}
+  function coreCatalog() {
+    if(loginPage())return null;
+    const route=location.hash.startsWith('#/')?location.hash.slice(1):location.pathname+location.search;
+    let url;try{url=new URL(route,location.origin);}catch{return null;}
+    const markers=!!first(CORE_CATALOG_TABS+','+CORE_LESSON_CARDS);
+    if(!markers&&!/^\/classes\/[^/?#]+\/?$/.test(url.pathname))return null;
+    const routeTab=norm(url.searchParams.get('tab'));
+    let tab=({foryou:'foryou',assigned:'assigned',alllessons:'alllessons'})[routeTab]||'unknown';
+    for(const node of all(CORE_CATALOG_TABS)) {
+      if(node.getAttribute('aria-selected')==='true'||node.getAttribute('aria-current')==='page'||node.getAttribute('data-state')==='active') {
+        tab=node.getAttribute('data-testid').split('-')[2];break;
+      }
+    }
+    if(tab==='unknown') {
+      if(first('[data-testid="assigned-tab"],[data-testid="assigned-tab-loading"],[data-testid="assigned-tab-empty"],[data-testid="assigned-tab-filter-empty"],[data-testid="assigned-tab-error"],[data-testid="core-coursework-assigned-activity-card-navigate"]'))tab='assigned';
+      else if(first('[data-testid="core-coursework-alllessons-activity-card-navigate"],#activities-container'))tab='alllessons';
+      else if(first('[data-testid="core-coursework-foryou-activity-card-navigate"],[data-testid="core-coursework-foryou-viewall-btn-navigate"],[data-testid="core-coursework-foryou-alllessons-btn-navigate"]'))tab='foryou';
+    }
+    const selectedFilter=first('[data-testid^="core-coursework-assigned-"][data-testid$="-chip-filter"][aria-pressed="true"]');
+    const filter=selectedFilter?.getAttribute('data-testid').match(/assigned-(all|todo|overdue|completed)-chip-filter$/)?.[1]||null;
+    return {type:'core-coursework',tab,filter,
+      loading:!!first('[data-testid="assigned-tab-loading"],[data-testid="all-tabs-loader"],[data-testid="assigned-task-loading"]'),
+      empty:!!first('[data-testid="assigned-tab-empty"],[data-testid="assigned-tab-filter-empty"],[data-testid^="assigned-tasks-empty-"]'),
+      error:!!first('[data-testid="assigned-tab-error"],[data-testid="assigned-task-error"]')};
+  }
   function uniqueNodes(nodes) {
     return [...new Set(nodes)].filter(node=>!nodes.some(other=>other!==node && other.contains(node)));
   }
   function titleOf(node,kind) {
     const attrs=kind==='subject'?['data-subject-name','data-name']:['data-lesson-name','data-name'];
     for(const attr of attrs)if(clean(node.getAttribute(attr)))return clean(node.getAttribute(attr));
+    if(kind==='lesson'&&node.matches('[data-testid="core-coursework-alllessons-activity-card-navigate"]')) {
+      const title=first('div.body-lg-regular.line-clamp-2[dir="ltr"]',node);
+      if(title)return text(title);
+      const thumbnail=first('[aria-label$=" activity thumbnail"]',node);
+      if(thumbnail)return clean(thumbnail.getAttribute('aria-label').replace(/ activity thumbnail$/,''));
+    }
     const name=first(kind==='subject'?'[data-testid="subject-title"],[data-subject-name],[class*="subject-name"],[class*="subjectName"],h2,h3,h4,[role="heading"]':'[data-testid="level-title"],[data-lesson-name],[data-testid="lesson-title"],[data-testid="activity-title"],h2,h3,h4,[role="heading"]',node);
     return clean(name?text(name):node.getAttribute('aria-label') || text(node));
   }
@@ -149,6 +183,14 @@
   }
   function statusFlag(node,kind) {
     const locked=kind==='locked';
+    if(node.matches(CORE_LESSON_CARDS)) {
+      if(locked&&node.querySelector('[data-testid="lock-icon"],[data-testid="in-review-label"]'))return true;
+      if(!locked) {
+        if(node.querySelector('[data-testid="teacher-test-completed-status"],[data-testid="assigned-item-score"]'))return true;
+        const label=first(CORE_LESSON_BUTTONS,node)||first('.body-md-light.text-subject-color-160',node);
+        if(label&&/^(review|مراجعة|راجع)$/.test(norm(text(label))))return true;
+      }
+    }
     const selectorsForStatus=locked
       ? '[data-locked="true"],[data-status="locked"],[aria-disabled="true"],.locked,.is-locked,.lesson-locked,[data-testid="lesson-lock"],[data-testid="locked-icon"]'
       : '[data-completed="true"],[data-status="completed"],[data-status="complete"],.completed,.is-completed,.lesson-completed,[data-testid="lesson-completed"],[data-testid="completed-icon"]';
@@ -175,32 +217,67 @@
       if(!name || name.length>220)continue;
       let id=node.getAttribute('data-alef-lesson') || node.getAttribute('data-lesson-id') || node.getAttribute('data-activity-id') || (node.getAttribute('data-testid')?.startsWith('level-card-container-')?node.getAttribute('data-testid'):null) || node.id ||
         `lesson-${hash((safeHref(node)||'')+name)}`;
-      if(lessons.has(id))id+=`-${++index}`;
-      const lesson={id,name,locked:statusFlag(node,'locked'),completed:statusFlag(node,'completed'),kind:node.matches('[data-testid^="level-card-container-"]')?'level':'lesson',node};
+      if(lessons.has(id)) {
+        // Core's responsive views may render the same activity twice without
+        // an exposed ID. Keep one stable title/href identity across layouts.
+        if(node.matches(CORE_LESSON_CARDS))continue;
+        id+=`-${++index}`;
+      }
+      const core=node.matches(CORE_LESSON_CARDS);
+      const clickNode=core?(first(CORE_LESSON_BUTTONS,node)||node):node;
+      const lesson={id,name,locked:statusFlag(node,'locked')||disabled(clickNode),completed:statusFlag(node,'completed'),kind:node.matches('[data-testid^="level-card-container-"]')?'level':core?'core-lesson':'lesson',node:clickNode};
       const href=safeHref(node);if(href)lesson.href=href;
       lessons.set(id,lesson);
     }
     return [...lessons.values()].map(({node,...item})=>item);
   }
   function learningContext() {
-    return /\/(?:pathways|lesson|activity|learn|content|assessment|exercise)/i.test(location.pathname) ||
-      !!first('[data-testid="question-renderer"],[data-testid="adaptive-question-renderer"],[data-alef-instruction],[data-alef-question],[data-alef-completed],[data-testid="content-page"],[data-testid="content-page-body-player"],ul[aria-label="SkillList"]');
+    return /\/(?:pathways|lesson|activity|learn|content|assessment|exercise|progress)/i.test(location.pathname+location.hash) ||
+      !!first('[data-testid="question-renderer"],[data-testid="adaptive-question-renderer"],[data-alef-instruction],[data-alef-question],[data-alef-completed],[data-testid="content-page"],[data-testid="content-page-body-player"],[data-testid="ncle-activity-page"],ul[aria-label="SkillList"]');
+  }
+  const assessmentTitle=label=>/\b(?:assessment|exit ticket|check (?:your |my )?understanding|practice|quiz|test)\b|اختبار|تقييم|تدريب|اسئلة|تحقق من فهمك|اختبر فهمك|بطاقة الخروج|تذكرة الخروج/.test(norm(label));
+  function coreComponentTitle(node) {
+    return text(first('span[dir="ltr"]',node))||clean(node.getAttribute('aria-label')||node.getAttribute('title'));
+  }
+  function availableAssessment(node) {
+    if(!node.matches('[data-testid="ncle-main-contents"] [data-testid="ncle-component-item"]')||node.getAttribute('aria-current')==='step'||node.classList.contains('completed')||node.classList.contains('text-primary-60'))return false;
+    // These classes reflect isComponentAccessibleForStudent in the public NCLE
+    // component. An enabled button alone does not mean the section is assigned.
+    if(!node.classList.contains('text-primary-100')&&!node.classList.contains('text-subject-color-160'))return false;
+    const current=first('[data-testid="ncle-main-contents"] [data-testid="ncle-component-item"][aria-current="step"]');
+    if(current&&assessmentTitle(coreComponentTitle(current)))return false;
+    // Keep working on a rendered assessment of unknown authored title rather
+    // than jumping away just because another assessment is in the sidebar.
+    if(first('[data-alef-question],[data-question-id],[data-testid="question-renderer"],[data-testid="new-question-renderer"]')&&
+      (!current||!(/\b(?:learn|learning|introduction|explanation)\b|تعلم|شرح|مقدمة/.test(norm(coreComponentTitle(current))))))return false;
+    return assessmentTitle(coreComponentTitle(node));
   }
   function actionKind(node) {
+    const testId=node.getAttribute('data-testid')||'';
+    const label=norm(node.getAttribute('aria-label')||text(node));
+    if(node.matches('[data-testid="ncle-main-contents"] [data-testid="ncle-component-item"]'))return availableAssessment(node)?'assessment':null;
+    if(/^core-coursework-(?:foryou|assigned)-showmore-btn-expand$/.test(testId))return 'expand';
+    if(testId==='core-coursework-assigned-tab-select'||testId==='core-coursework-foryou-viewall-btn-navigate')return coreCatalog()?.tab==='assigned'?null:'catalog';
+    if(testId==='core-coursework-alllessons-tab-select'||/^core-coursework-(?:foryou|assigned|assigned-filterempty)-alllessons-btn-navigate$/.test(testId))return coreCatalog()?.tab==='alllessons'?null:'catalog';
+    if(testId==='core-coursework-assigned-all-chip-filter')return node.getAttribute('aria-pressed')==='true'?null:'catalog';
+    if(testId==='skip-content-modal-leave-button')return 'skip';
+    if(testId==='activity-navigation-bar__next-button')return 'next';
+    if(testId==='activity-navigation-bar__finish-button'||testId==='finish-button')return 'finish';
+    if((testId==='next-button'||node.id==='alef-next-button')&&!/^(submit|submit answer|check|check answer|confirm answer|try again|ارسال|ارسال الاجابة|تحقق|تحقق من الاجابة|تاكيد الاجابة|حاول مرة اخري|حاول مجددا)$/.test(label))return 'next';
+    if(testId==='ncle-sidebar-back'||testId==='ncle-completion-page-back')return 'back';
     if(node.matches('#skill-player-practice,[data-alef-assessment],[data-testid="start-assessment"],[data-testid="practice-button"]'))return 'assessment';
     if(node.matches('[data-alef-skip],[data-testid="skip-button"],[data-testid="skip-intro"]'))return 'skip';
     if(node.matches('[data-alef-next-lesson],[data-testid="next-lesson"]'))return 'nextLesson';
     if(node.matches('[data-alef-back],[data-testid="pathway-back-button-header"],[data-testid="back-to-lessons"],[data-testid="back-button"],[data-testid="mobile-close-button"]'))return 'back';
     if(node.matches('[data-alef-finish],[data-testid="finish-lesson"]'))return 'finish';
     if(node.matches('[data-alef-next]'))return 'next';
-    const label=norm(node.getAttribute('aria-label')||text(node));
     if(/^(تخطي|تجاوز|تخطي المقدمة|تجاوز المقدمة|تخطي الشرح|تجاوز الشرح|skip|skip intro|skip introduction|skip explanation)$/.test(label))return 'skip';
     if(/^(i['’]?ll try later|try later|ساحاول لاحقا|ساجرب لاحقا|احاول لاحقا)$/.test(label))return 'skip';
     if(/^(try again|حاول مرة اخري|حاول مجددا)$/.test(label)&&learningContext())return 'retry';
-    if(/^(start|ابدا|بدء)$/.test(label)&&learningContext())return 'next';
+    if(/^(start|ابدا|بدء|ابدا الان)$/.test(label)&&learningContext())return 'next';
     if(/^(ابدا الاسئلة|بدء الاسئلة|انتقل الي الاسئلة|ابدا الاختبار|بدء الاختبار|ابدا التقييم|ابدا التمرين|اختبر فهمك|قيم فهمك|اسئلة الدرس|لنختبر فهمك|start assessment|start quiz|take assessment|go to assessment|start practice|start exercise|check your understanding|ready for questions|let's go)$/.test(label))return 'assessment';
     if(/^(الدرس التالي|انتقل الي الدرس التالي|النشاط التالي|next lesson|next activity)$/.test(label))return 'nextLesson';
-    if(/^(العودة للدروس|العودة الي الدروس|رجوع الي الدروس|قائمة الدروس|العودة للمادة|العودة الي المادة|back to lessons|back to course|back to subject)$/.test(label))return 'back';
+    if(/^(العودة للدروس|العودة الي الدروس|رجوع الي الدروس|قائمة الدروس|العودة للمادة|العودة الي المادة|العودة الي المقرر|back to lessons|back to course|back to subject|back to coursework)$/.test(label))return 'back';
     if(!learningContext())return null;
     if(/^(التالي|السؤال التالي|متابعة|استمرار|next|next question|continue|continue practice)$/.test(label))return 'next';
     if(/^(انهاء|انهاء الدرس|اكمال الدرس|finish|finish lesson|complete lesson|done)$/.test(label))return 'finish';
@@ -210,16 +287,24 @@
   function discoverActions() {
     actions=new Map();
     if(loginPage())return [];
-    const query='[data-testid="back-button"],[data-testid="mobile-close-button"],button,a[href],[role="button"],#skill-player-practice,[data-alef-skip],[data-alef-assessment],[data-alef-next],[data-alef-next-lesson],[data-alef-back],[data-alef-finish]';
+    const query='[data-testid^="core-coursework-"],[data-testid="skip-content-modal-leave-button"],[data-testid="back-button"],[data-testid="mobile-close-button"],button,a[href],[role="button"],#alef-next-button,#skill-player-practice,[data-alef-skip],[data-alef-assessment],[data-alef-next],[data-alef-next-lesson],[data-alef-back],[data-alef-finish]';
     const candidates=all(query).filter(node=>!disabled(node) && !catalogAncestor(node));
     const counts=new Map();
     for(const node of candidates) {
       const kind=actionKind(node);if(!kind)continue;
+      if(first('[data-testid="ncle-lock-screen"]')&&kind!=='back')continue;
       const label=clean(node.getAttribute('aria-label')||text(node)).slice(0,160)||kind;
       const base=node.id || node.getAttribute('data-testid') || `${kind}-${hash(label+safeHref(node))}`;
       const count=counts.get(base)||0;counts.set(base,count+1);
       const id=count?`${base}-${count}`:base;
-      actions.set(id,{id,label,kind,node});
+      let metadata={};
+      if(kind==='catalog') {
+        const testId=node.getAttribute('data-testid');
+        metadata=testId==='core-coursework-assigned-all-chip-filter'?{filter:'all',priority:1}
+          :testId==='core-coursework-assigned-tab-select'||testId==='core-coursework-foryou-viewall-btn-navigate'?{catalogTab:'assigned',priority:0}
+            :{catalogTab:'alllessons',priority:2};
+      }
+      actions.set(id,{id,label,kind,...metadata,node});
     }
     return [...actions.values()].map(({node,...item})=>item);
   }
@@ -240,7 +325,8 @@
     return matches[0]||null;
   }
   function completionVisible() {
-    if(all(selectors.completed || '[data-testid="go-super-pro-btn"],[data-alef-completed],[data-testid="lesson-complete"],[data-testid="assessment-complete"],[data-testid="assessment-completed"]').filter(el=>!catalogAncestor(el)).length)return true;
+    if(!selectors.completed&&first('[data-testid="ncle-assessment-result"]')&&!first('[data-testid="ncle-completion-page"]'))return false;
+    if(all(selectors.completed || '[data-testid="ncle-completion-page"],[data-testid="go-super-pro-btn"],[data-alef-completed],[data-testid="lesson-complete"],[data-testid="assessment-complete"],[data-testid="assessment-completed"]').filter(el=>!catalogAncestor(el)).length)return true;
     return all('[role="status"],[role="alert"],h1,h2').some(el=>!catalogAncestor(el) &&
       /^(اكملت الدرس|اكملت الدرس بنجاح|اكملت الواجب بنجاح|اكتمل الدرس|اكتملت الاسئلة|lesson complete|lesson completed|assessment complete|assessment completed|you completed this lesson|all questions completed)$/.test(norm(text(el))));
   }
@@ -248,6 +334,7 @@
     const listedSubjects=discoverSubjects();
     const listedLessons=discoverLessons();
     const navigation=discoverActions();
+    const catalog=coreCatalog();
     const diagnostics=[...new Set(frameDiagnostics)];
     let question=null,questionFound=false,questionState={};
     const completed=!loginPage() && completionVisible();
@@ -256,22 +343,27 @@
       catch(error){questionFound=true;diagnostics.push(error.message);}
     }
     let stage='unknown';
-    if(completed)stage='complete';
+    if(loginPage())stage='unknown';
+    else if(completed)stage='complete';
+    else if(first('[data-testid="skip-content-modal"],[data-testid="ncle-lock-screen"]'))stage='instruction';
     else if(questionFound&&!question&&navigation.some(action=>action.kind==='next'&&/^(start|ابدا|بدء)$/.test(norm(action.label))))stage='instruction';
-    else if(questionFound && !(navigation.some(action=>['skip','assessment'].includes(action.kind)) && first('[data-alef-instruction],[data-testid="content-page"],[data-testid="content-page-body-player"]')))stage='question';
-    else if(listedLessons.length)stage='lessons';
+    else if(questionFound && !((navigation.some(action=>['skip','assessment'].includes(action.kind)) && first('[data-alef-instruction],[data-testid="content-page"],[data-testid="content-page-body-player"]'))||
+      (navigation.some(action=>action.kind==='skip'||(action.kind==='assessment'&&actions.get(action.id)?.node.matches('[data-testid="ncle-component-item"]')))&&first('[data-testid="ncle-activity-page-player"]'))))stage='question';
+    else if(listedLessons.length||catalog)stage='lessons';
     else if(!loginPage() && (navigation.some(action=>['skip','assessment'].includes(action.kind)) || (learningContext()&&navigation.some(action=>action.kind==='next')) ||
-      first('[data-alef-instruction],[data-testid="content-page"],[data-testid="content-page-body-player"],.lesson-intro,.instruction')))stage='instruction';
+      first('[data-alef-instruction],[data-testid="content-page"],[data-testid="content-page-body-player"],[data-testid="ncle-activity-page"],.lesson-intro,.instruction')))stage='instruction';
     else if(listedSubjects.length)stage='subjects';
     if(loginPage())diagnostics.push('صفحة تسجيل الدخول ظاهرة. سجّل الدخول إلى ألف ثم أعد فحص المواد.');
     else if(stage==='unknown')diagnostics.push('لم تتطابق الصفحة مع مواد أو دروس أو سؤال مدعوم. أرسل تقرير تشخيص الواجهة لضبط القارئ.');
+    if(first('[data-testid="ncle-lock-screen"]'))diagnostics.push('هذا القسم غير مسند أو مقفل في ألف؛ لا يمكن تجاوز القفل تلقائيًا.');
+    if(catalog?.error)diagnostics.push('تعذر تحميل المهام المسندة في ألف. أعد تحميل قائمة المادة ثم افحصها.');
     if(!listedSubjects.length && ['lessons','instruction','question','complete'].includes(stage)) {
       subjects.set('current',{id:'current',name:'المادة المفتوحة حاليًا',node:null});
       listedSubjects.push({id:'current',name:'المادة المفتوحة حاليًا'});
     }
-    const fingerprint=hash(JSON.stringify([location.pathname,stage,listedSubjects,listedLessons,question?.id,question?.fingerprint,navigation,completed,text(first('[data-alef-instruction],[data-testid="content-page-body-player"],.instruction,main')).slice(0,3000)]));
+    const fingerprint=hash(JSON.stringify([location.pathname,location.search,location.hash,stage,catalog,listedSubjects,listedLessons,question?.id,question?.fingerprint,navigation,completed,text(first('[data-alef-instruction],[data-testid="content-page-body-player"],.instruction,main')).slice(0,3000)]));
     return {ok:true,page:{title:document.title,url:location.href},stage,subjects:listedSubjects,lessons:listedLessons,
-      question,needsPreparation:!!questionState.needsPreparation,feedback:questionState.feedback,completed,canNext:navigation.some(action=>action.kind==='next'),navigation,fingerprint,
+      question,needsPreparation:!!questionState.needsPreparation,feedback:questionState.feedback,completed,canNext:navigation.some(action=>action.kind==='next'),navigation,fingerprint,...(catalog?{catalog}:{}),
       diagnostics:[...new Set(diagnostics)],capabilities:{text:true,single:true,multiple:true,images:false,dragAndDrop:true,customSelectors:true,courseNavigation:true}};
   }
   const scan=()=>inspect();
@@ -472,8 +564,8 @@
   }
   function diagnostics(){
     const snapshot=inspect();
-    const cleanUrl=value=>{try{const url=new URL(value,location.href);return url.origin+url.pathname;}catch{return '';}};
-    return {ok:true,diagnostics:{version:'0.3.0',page:{url:cleanUrl(location.href)},stage:snapshot.stage,subjects:snapshot.subjects,lessons:snapshot.lessons.map(({href,...lesson})=>({...lesson,href:href?cleanUrl(href):undefined})),navigation:snapshot.navigation,issues:snapshot.diagnostics,frames:[...document.querySelectorAll('iframe')].map(frame=>({url:cleanUrl(frame.src),sameOrigin:!!frame.contentDocument})),controls:all('button,[role="button"],[data-testid]').filter(node=>!node.closest('form')&&!node.matches('input,textarea')).slice(0,100).map(node=>({tag:node.tagName,role:node.getAttribute('role'),testId:node.getAttribute('data-testid'),classes:[...node.classList].slice(0,6),label:clean(node.getAttribute('aria-label')|| (node.matches('button,[role="button"]')?text(node):'')).slice(0,100)}))}};
+    const cleanUrl=value=>{try{const url=new URL(value,location.href);return url.origin+url.pathname+(url.hash.startsWith('#/')?url.hash.split('?')[0]:'');}catch{return '';}};
+    return {ok:true,diagnostics:{version:'0.4.0',page:{url:cleanUrl(location.href)},stage:snapshot.stage,subjects:snapshot.subjects,lessons:snapshot.lessons.map(({href,...lesson})=>({...lesson,href:href?cleanUrl(href):undefined})),navigation:snapshot.navigation,issues:snapshot.diagnostics,frames:[...document.querySelectorAll('iframe')].map(frame=>({url:cleanUrl(frame.src),sameOrigin:!!frame.contentDocument})),controls:all('button,[role="button"],[data-testid]').filter(node=>!node.closest('form')&&!node.matches('input,textarea')).slice(0,100).map(node=>({tag:node.tagName,role:node.getAttribute('role'),testId:node.getAttribute('data-testid'),classes:[...node.classList].slice(0,6),label:clean(node.getAttribute('aria-label')|| (node.matches('button,[role="button"]')?text(node):'')).slice(0,100)}))}};
   }
   function handle(message){
     rootsCache=null;frameDiagnostics=[];settings(message.selectors);

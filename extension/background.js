@@ -16,7 +16,7 @@ const allowedOrigin = url => {
 };
 const freshStats = () => ({solved:0,review:0,total:0,lessonsCompleted:0,lessonsTotal:0,lessonsReview:0});
 const freshState = () => ({running:false,status:'idle',page:null,subjects:[],subjectId:null,
-  queue:[],currentLesson:null,catalogURL:null,stats:freshStats(),events:[],lastEvent:null});
+  queue:[],currentLesson:null,catalogURL:null,catalogClass:null,stats:freshStats(),events:[],lastEvent:null});
 const key = tabId => `alef:run:${tabId}`;
 const aborted = () => new DOMException('تم إيقاف التشغيل.','AbortError');
 function assertActive(signal) { if (signal.aborted) throw aborted(); }
@@ -67,10 +67,23 @@ function checkedTabId(value) {
   if (!Number.isSafeInteger(value) || value < 0) throw new Error('افتح صفحة ألف ثم افتح الإضافة من تبويبها.');
   return value;
 }
+function observedCoreClass(value) {
+  try {
+    const url=new URL(value);
+    const route=url.hash.startsWith('#/')?new URL(url.hash.slice(1),url.origin):url;
+    const match=route.pathname.match(/^\/classes\/([^/]+)\/?$/)||route.pathname.match(/^\/progress\/ncle\/(?:class|result)\/([^/]+)(?:\/|$)/);
+    return match?`${url.origin}/classes/${match[1]}`:null;
+  } catch { return null; }
+}
 async function checkedTab(tabId,origin) {
   const tab = await chrome.tabs.get(tabId);
   if (!allowedOrigin(tab.url)) throw Object.assign(new Error('افتح https://moe.alefed.com/ أولًا؛ الربط متاح لموقع ألف فقط.'),{fatal:true});
   if (origin && new URL(tab.url).origin !== origin) throw Object.assign(new Error('انتقلت الصفحة خارج الموقع المرتبط. أوقف التشغيل وأعد الربط.'),{fatal:true});
+  const expected=states.get(tabId)?.catalogClass;
+  const actual=observedCoreClass(tab.url);
+  if(runs.has(tabId)&&expected&&actual&&actual!==expected) {
+    throw Object.assign(new Error('انتقلت الصفحة إلى مادة أخرى. أوقف التشغيل وأعد فحص المادة المطلوبة.'),{fatal:true});
+  }
   return tab;
 }
 async function inject(tabId,origin) {
@@ -139,8 +152,54 @@ async function inspect(tabId,config,origin,signal) {
 }
 const snapshotKey = snapshot => snapshot?.fingerprint || JSON.stringify([
   snapshot?.stage,snapshot?.question?.id,snapshot?.question?.fingerprint,snapshot?.completed,
-  snapshot?.lessons?.map(item=>[item.id,item.locked,item.completed]),snapshot?.navigation?.map(item=>[item.id,item.kind]),
+  snapshot?.lessons?.map(item=>[item.id,item.locked,item.completed]),snapshot?.navigation?.map(item=>[item.id,item.kind]),snapshot?.catalog,
 ]);
+const coreCatalog = snapshot => snapshot?.stage === 'lessons' && snapshot.catalog?.type === 'core-coursework';
+
+async function prepareCatalog(tabId,initial,config,origin,signal,{expandAll=false,targetId}={}) {
+  let snapshot=initial;
+  const clicked=new Set();
+  const expected=(await getState(tabId)).catalogClass;
+  for(let step=0;step<100;step++) {
+    assertActive(signal);
+    if(!coreCatalog(snapshot))return snapshot;
+    if(expected&&observedCoreClass(snapshot.page?.url)!==expected) {
+      throw Object.assign(new Error('تغيرت المادة المرتبطة. أعد فحص المادة المطلوبة قبل المتابعة.'),{fatal:true});
+    }
+    if(snapshot.catalog.error)throw new Error(diagnostic(snapshot,'تعذّر تحميل قائمة المهام في ألف. أعد تحميل صفحة المادة ثم افحصها.'));
+    const navigation=snapshot.navigation||[];
+    // For You contains only recent items. Assigned + All includes unfinished
+    // overdue work as well; the To Do filter alone would silently omit it.
+    const tab=snapshot.catalog.tab;
+    let action=tab!=='assigned'
+      ? navigation.find(item=>item.kind==='catalog'&&item.catalogTab==='assigned') ||
+        navigation.find(item=>item.kind==='catalog'&&item.catalogTab==='alllessons') : null;
+    if(!action && tab==='assigned')action=navigation.find(item=>item.kind==='catalog'&&item.filter==='all');
+    if(!action && (snapshot.catalog.loading || (!snapshot.lessons?.length && !snapshot.catalog.empty))) {
+      snapshot=await waitSnapshot(tabId,config,origin,signal,item=>!coreCatalog(item)||
+        (!item.catalog.loading && (!!item.lessons?.length||item.catalog.empty)));
+      if(coreCatalog(snapshot) && (snapshot.catalog.loading || (!snapshot.lessons?.length&&!snapshot.catalog.empty))) {
+        throw new Error('لم تكتمل قائمة المهام في ألف. انتظر ظهور الدروس ثم أعد البدء.');
+      }
+      continue;
+    }
+    if(!action && (expandAll || (targetId&&!snapshot.lessons?.some(item=>item.id===targetId)))) {
+      action=navigation.find(item=>item.kind==='expand');
+    }
+    if(!action)return snapshot;
+    const before=snapshotKey(snapshot);
+    const identity=`${before}:${action.id}`;
+    if(clicked.has(identity))throw new Error('لم تتغير قائمة المهام بعد الضغط. أوقف تكرار المحاولة؛ أعد فحص الصفحة.');
+    clicked.add(identity);
+    await emit(tabId,'status',action.kind==='expand'?'إظهار بقية المهام المتاحة…':
+      action.filter==='all'?'عرض المهام المفتوحة والمتأخرة معًا…':'فتح قائمة المهام المسندة…');
+    await navigate(tabId,snapshot,action,config,origin,signal);
+    snapshot=await waitSnapshot(tabId,config,origin,signal,item=>snapshotKey(item)!==before&&item.stage!=='unknown'&&
+      (!coreCatalog(item)||!item.catalog.loading));
+    if(snapshotKey(snapshot)===before)throw new Error('لم تستجب قائمة المهام للانتقال. أعد فحص الصفحة بعد اكتمال تحميلها.');
+  }
+  throw new Error('وصل تحميل قائمة المهام إلى الحد المتاح. راجع القائمة قبل بدء جلسة جديدة.');
+}
 const sameQuestion = (snapshot,question) => snapshot?.question?.id === question.id &&
   snapshot.question.fingerprint === question.fingerprint;
 async function waitSnapshot(tabId,config,origin,signal,predicate=()=>true,timeout=12000) {
@@ -331,7 +390,8 @@ async function runLesson(tabId,subject,initial,lesson,config,origin,signal,state
 }
 async function returnToCatalog(tabId,config,origin,signal,state,previous) {
   let snapshot = previous || await inspect(tabId,config,origin,signal);
-  const isCatalog=item=>item?.stage==='lessons'&&item.lessons?.some(lesson=>state.queue.some(row=>row.id===lesson.id));
+  const isCatalog=item=>(coreCatalog(item)&&(!state.catalogClass||observedCoreClass(item.page?.url)===state.catalogClass))||
+    (!coreCatalog(item)&&item?.stage==='lessons'&&item.lessons?.some(lesson=>state.queue.some(row=>row.id===lesson.id)));
   if (isCatalog(snapshot)) return snapshot;
   const back = snapshot.navigation?.find(item=>item.kind==='back');
   if (back) {
@@ -368,6 +428,8 @@ async function run(tabId,subjectId,config,controller) {
     await pageMessage(tabId,{type:'ALEF_SELECT_SUBJECT',subjectId,selectors:config.selectors},origin,signal);
     await pause(250,signal);
     let snapshot = await waitSnapshot(tabId,config,origin,signal,item=>!['unknown','subjects'].includes(item.stage));
+    state.catalogClass=coreCatalog(snapshot)?observedCoreClass(snapshot.page?.url):null;
+    snapshot = await prepareCatalog(tabId,snapshot,config,origin,signal,{expandAll:true});
     const catalogMode = snapshot.stage === 'lessons';
     if (catalogMode) {
       state.catalogURL = snapshot.page?.url || (await checkedTab(tabId,origin)).url;
@@ -400,10 +462,13 @@ async function run(tabId,subjectId,config,controller) {
         if (catalogMode) {
           if (snapshot.stage !== 'lessons') snapshot = await returnToCatalog(tabId,config,origin,signal,state,snapshot);
           if (!snapshot) throw Object.assign(new Error('تعذرت العودة الآمنة إلى قائمة الدروس. افتح قائمة المادة ثم أعد البدء.'),{fatal:true});
+          snapshot = await prepareCatalog(tabId,snapshot,config,origin,signal,{targetId:lesson.id});
           await pageMessage(tabId,{type:'ALEF_OPEN_LESSON',lessonId:lesson.id,
             fingerprint:snapshot.fingerprint,selectors:config.selectors},origin,signal);
           const previous = snapshotKey(snapshot);
-          snapshot = await waitSnapshot(tabId,config,origin,signal,item=>snapshotKey(item)!==previous && item.stage!=='unknown');
+          snapshot = await waitSnapshot(tabId,config,origin,signal,item=>snapshotKey(item)!==previous && item.stage!=='unknown'&&
+            (lesson.kind!=='core-lesson'||item.stage!=='lessons'));
+          if(lesson.kind==='core-lesson'&&snapshot.stage==='lessons')throw new Error('لم يفتح محتوى الدرس بعد. انتظر اكتمال تحميله ثم أعد البدء.');
         }
         outcome = await runLesson(tabId,subject,snapshot,lesson,config,origin,signal,state);
       } catch (error) {
@@ -427,12 +492,13 @@ async function run(tabId,subjectId,config,controller) {
         state.currentLesson = null;
         await emit(tabId,'complete','اكتملت الأسئلة الظاهرة لهذا النشاط.');return;
       }
-      const catalog = await returnToCatalog(tabId,config,origin,signal,state,snapshot);
+      let catalog = await returnToCatalog(tabId,config,origin,signal,state,snapshot);
       if (!catalog) {
         if (state.queue.some(item=>item.status==='pending') || !outcome.completed) {
           await emit(tabId,'review',outcome.message || 'اكتمل الدرس الحالي، لكن تعذرت العودة الآمنة إلى بقية دروس المادة.',{blocking:true});return;
         }
       } else {
+        catalog = await prepareCatalog(tabId,catalog,config,origin,signal);
         snapshot = catalog;
         state.catalogURL = snapshot.page?.url || state.catalogURL;
         updateQueue(state,snapshot);
@@ -476,7 +542,7 @@ async function handle(message) {
       if (!state.page || !state.subjects.some(item=>item.id===message.subjectId)) throw new Error('اربط صفحة ألف واختر مادة أولًا.');
       await checkedTab(tabId,new URL(state.page.url).origin);
       state.running = true;state.status='running';state.subjectId=message.subjectId;
-      state.stats=freshStats();state.queue=[];state.currentLesson=null;state.catalogURL=null;state.events=[];state.lastEvent=null;
+      state.stats=freshStats();state.queue=[];state.currentLesson=null;state.catalogURL=null;state.catalogClass=null;state.events=[];state.lastEvent=null;
       const controller = new AbortController();
       runs.set(tabId,controller);
       await saveState(tabId);

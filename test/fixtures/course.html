@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>اختبار محلي — قائمة المواد والدروس</title>
+  <style>
+    body{font:16px/1.8 system-ui,sans-serif;background:#f5f8fa;color:#19372d;max-width:850px;margin:35px auto;padding:15px}
+    button,a{font:inherit;border:1px solid #b6c9bd;border-radius:8px;background:#fff;padding:12px 18px;cursor:pointer;color:inherit}
+    button:disabled{opacity:.55;cursor:default}section,article{background:white;border:1px solid #e0e9e2;border-radius:12px;padding:22px;margin:15px 0}
+    nav,.cards{display:grid;gap:12px}.cards{grid-template-columns:repeat(2,minmax(0,1fr))}.lesson-card{text-align:right}.lesson-card h3{margin:0;font-size:17px}
+    .subject-card{display:flex;gap:16px;align-items:center;text-align:right}.subject-card h2{font-size:20px;margin:0}.subject-card small{display:block;color:#81948b}
+    .notice{font-size:13px;color:#687c73}label{display:block;padding:12px;border:1px solid #d7e3d9;margin:8px 0}textarea{display:block;width:90%;min-height:70px;font:inherit}
+    [hidden]{display:none!important}
+  </style>
+</head>
+<body>
+  <p class="notice">بيئة اختبار مصطنعة محلية؛ ليست موقع ألف ولا تستدعي نموذجًا حقيقيًا.</p>
+  <main id="content"></main>
+  <script>
+  (()=>{
+    const parameters=new URLSearchParams(location.search);
+    const scenario=parameters.get('scenario')||'normal';
+    const key='course-fixture:'+scenario;
+    let saved;
+    try{saved=JSON.parse(sessionStorage.getItem(key)||'null');}catch{}
+    const state=saved||{completed:[],submissions:[],actions:[],question:0,lesson:null,intro:0};
+    const content=document.getElementById('content');
+    const lessons=[
+      {id:'lesson-1',name:'الدرس الأول — الضرب'},
+      {id:'lesson-2',name:'الدرس الثاني — الأشكال'},
+      {id:'lesson-3',name:'الدرس الثالث — مراجعة'},
+      {id:'lesson-locked',name:'درس لم يفتحه المعلم',locked:true},
+      {id:'lesson-done',name:'درس مكتمل سابقًا',completed:true},
+    ];
+    const persist=()=>sessionStorage.setItem(key,JSON.stringify(state));
+    const record=(kind,details={})=>{state.actions.push({kind,...details});persist();};
+    const url=(view,lesson)=>{
+      const next=new URL(location.href);next.searchParams.set('view',view);
+      if(lesson)next.searchParams.set('lesson',lesson);else next.searchParams.delete('lesson');
+      return next;
+    };
+    const navigate=(view,lesson)=>history.replaceState(null,'',url(view,lesson));
+    function element(tag,label,attrs={}){
+      const node=document.createElement(tag);if(label)node.textContent=label;
+      for(const[name,value]of Object.entries(attrs))node.setAttribute(name,value);
+      return node;
+    }
+    function back(){
+      const button=element('button','العودة للدروس',{'data-alef-back':''});
+      button.addEventListener('click',()=>{record('back',{lesson:state.lesson});renderLessons();});return button;
+    }
+    function renderSubjects(){
+      navigate('subjects');content.replaceChildren(element('h1','المواد الدراسية'));
+      const nav=element('nav','',{'aria-label':'المواد'});
+      for(const[id,name]of [['math','الرياضيات'],['science','العلوم']]){
+        const button=element('button','',scenario==='semantic'?{class:'subject-card'}:{'data-alef-subject':id,class:'subject-card'});
+        button.append(element('span','▦'),element('h2',name),element('small','دروسك المفتوحة'));
+        button.addEventListener('click',()=>{record('subject',{id});renderLessons();});nav.append(button);
+      }
+      content.append(nav);
+    }
+    function renderLessons(){
+      state.lesson=null;persist();navigate('lessons');
+      content.replaceChildren(element('h1','دروس الرياضيات'));
+      const cards=element('div','',{'data-alef-lessons':'',class:'cards'});
+      for(const lesson of lessons){
+        const done=lesson.completed||state.completed.includes(lesson.id);
+        const card=element('button','',{'data-alef-lesson':lesson.id,class:'lesson-card','data-lesson-name':lesson.name});
+        card.append(element('h3',lesson.name));
+        if(lesson.locked){card.disabled=true;card.dataset.locked='true';card.append(element('span','مغلق'));}
+        if(done){card.dataset.completed='true';card.append(element('span','مكتمل'));}
+        card.addEventListener('click',()=>{
+          record('lesson',{id:lesson.id});state.lesson=lesson.id;state.intro=0;state.question=0;persist();renderInstruction();
+        });
+        cards.append(card);
+      }
+      content.append(cards);
+    }
+    function renderInstruction(){
+      navigate('lesson',state.lesson);content.replaceChildren();
+      const article=element('section','',{'data-alef-instruction':'',class:'instruction-step'});
+      article.append(element('h1',lessons.find(lesson=>lesson.id===state.lesson)?.name),element('h2',`شرح الدرس — الخطوة ${state.intro+1}`),element('p','محتوى تعليمي تجريبي قبل أسئلة التقييم.'));
+      const mandatory=scenario==='mandatory'&&state.lesson==='lesson-1';
+      if(mandatory){
+        article.append(element('p','يجب إكمال الفيديو أولًا'));
+        const unavailable=element('button','الانتقال للأسئلة',{'data-alef-assessment':''});unavailable.disabled=true;article.append(unavailable);
+      }else{
+        const last=state.intro===2;
+        const next=element('button',last?'ابدأ الأسئلة':'التالي',last?{'data-alef-assessment':''}:{'data-alef-next':''});
+        next.addEventListener('click',()=>{
+          record('instruction',{lesson:state.lesson,step:state.intro});
+          state.intro+=1;persist();if(last)renderQuestion();else renderInstruction();
+        });article.append(next);
+      }
+      article.append(back());content.append(article);
+    }
+    function renderQuestion(){
+      navigate('lesson',state.lesson);content.replaceChildren();
+      const id=state.lesson+'-q'+(state.question+1);
+      const section=element('section','',{'data-alef-question':id});
+      const isText=state.question===1;
+      section.append(element('h2',isText?'اكتب اسم الشكل ذي ثلاثة أضلاع.':'ما ناتج 6 × 7؟',{'data-alef-question-text':''}));
+      if(isText)section.append(element('textarea','',{'data-alef-answer':'','aria-label':'الإجابة'}));
+      else for(const[option,label]of [['a','36'],['b','42'],['c','48']]){
+        const wrapper=element('label','',{'data-alef-option':option});
+        const input=element('input','',{type:'radio',name:id,value:option,id:id+'-'+option});wrapper.htmlFor=input.id;
+        wrapper.append(input,document.createTextNode(label));section.append(wrapper);
+      }
+      const submit=element('button','إرسال الإجابة',{'data-alef-submit':''});
+      const next=element('button','السؤال التالي',{'data-alef-next':''});next.hidden=true;
+      const feedback=element('p','',{'role':'status'});
+      submit.addEventListener('click',()=>{
+        const selected=isText?section.querySelector('textarea').value:section.querySelector('input:checked')?.value;
+        const correct=selected===(isText?'مثلث':'b');
+        state.submissions.push({lesson:state.lesson,id,selected,correct});persist();
+        record('submit',{lesson:state.lesson,id,correct});feedback.textContent=correct?'إجابة صحيحة':'إجابة غير صحيحة';
+        submit.disabled=true;next.hidden=false;
+      });
+      next.addEventListener('click',()=>{record('nextQuestion',{lesson:state.lesson});state.question+=1;persist();if(state.question<2)renderQuestion();else renderComplete();});
+      section.append(feedback,submit,next,back());content.append(section);
+    }
+    function renderComplete(){
+      if(!state.completed.includes(state.lesson))state.completed.push(state.lesson);persist();
+      record('complete',{lesson:state.lesson});content.replaceChildren();
+      const done=element('section','',{'data-alef-completed':'true'});
+      done.append(element('h1','أكملت الدرس بنجاح'),back());content.append(done);
+    }
+    window.courseFixture={
+      get state(){return structuredClone(state);},
+      showLessons:renderLessons,
+      showSubjects:renderSubjects,
+      forceLesson(id){state.lesson=id;state.intro=0;state.question=0;renderInstruction();},
+      mutateInstruction(){state.intro+=1;renderInstruction();},
+    };
+    if(scenario==='unknown'){
+      content.replaceChildren(element('h1','تسجيل الدخول'));
+      content.append(element('input','',{type:'password','aria-label':'كلمة المرور'}),element('button','دخول'));
+    }else if(parameters.get('view')==='lessons')renderLessons();
+    else if(parameters.get('view')==='lesson'&&parameters.get('lesson')){
+      state.lesson=parameters.get('lesson');renderInstruction();
+    }else renderSubjects();
+  })();
+  </script>
+</body>
+</html>

@@ -2,12 +2,27 @@
   "manifest_version": 3,
   "name": "مُعين | مساعد ألف",
   "description": "اختر المادة، تابع الحل، وراجع الإجابات غير المؤكدة. يعمل مع جلسة ألف المفتوحة وخادم ذكاء اصطناعي محلي.",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "minimum_chrome_version": "120",
-  "permissions": ["activeTab", "scripting", "storage"],
-  "host_permissions": ["http://127.0.0.1/*", "http://localhost/*"],
-  "optional_host_permissions": ["https://moe.alefed.com/*"],
-  "background": { "service_worker": "background.js" },
-  "action": { "default_title": "افتح مُعين ألف" },
-  "content_security_policy": { "extension_pages": "script-src 'self'; object-src 'none'; base-uri 'none';" }
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1/*",
+    "http://localhost/*"
+  ],
+  "optional_host_permissions": [
+    "https://moe.alefed.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "افتح مُعين ألف"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'none'; base-uri 'none';"
+  }
 }

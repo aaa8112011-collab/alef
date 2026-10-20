@@ -197,3 +197,24 @@ test('local malformed answers and verifier disagreement retain existing review s
   assert.equal(disagreement.reason, 'verification_disagreement');
   await assert.rejects(solveQuestion(input, localConfig(async () => new Response(JSON.stringify({ message: { content: 'not JSON' } })))), { code: 'invalid_provider_response' });
 });
+
+const matchingInput={...input,question:{id:'match-q',text:'صل كل عدد باسمه.',type:'matching',options:[],items:[{id:'i1',text:'1'},{id:'i2',text:'2'}],targets:[{id:'t1',text:'واحد'},{id:'t2',text:'اثنان'},{id:'t3',text:'ثلاثة'}]}};
+const matchingAnswer={...answer,optionIds:[],text:'1 مع واحد و2 مع اثنان',matches:[{itemId:'i1',targetId:'t1'},{itemId:'i2',targetId:'t2'}]};
+test('matching validates a complete mapping and verifies it independent of pair order',async()=>{
+  let calls=0;
+  const result=await solveQuestion(matchingInput,config(async()=>providerResponse({...matchingAnswer,matches:++calls===1?matchingAnswer.matches:[...matchingAnswer.matches].reverse()})));
+  assert.equal(result.verified,true);assert.equal(result.needsReview,false);assert.deepEqual(result.answer.matches,matchingAnswer.matches);
+});
+test('matching rejects incomplete mappings, unknown IDs, duplicate items, and reused targets',async()=>{
+  for(const matches of [[{itemId:'i1',targetId:'t1'}],[{itemId:'i1',targetId:'unknown'},{itemId:'i2',targetId:'t2'}],[{itemId:'i1',targetId:'t1'},{itemId:'i1',targetId:'t2'}],[{itemId:'i1',targetId:'t1'},{itemId:'i2',targetId:'t1'}]]){
+    const result=await solveQuestion(matchingInput,config(async()=>providerResponse({...matchingAnswer,matches})));
+    assert.equal(result.needsReview,true);assert.equal(result.reason,'invalid_selection');
+  }
+});
+test('matching disagreement and invalid provider mapping do not become verified solutions',async()=>{
+  let calls=0;
+  const result=await solveQuestion(matchingInput,config(async()=>providerResponse(++calls===1?matchingAnswer:{...matchingAnswer,matches:[{itemId:'i1',targetId:'t2'},{itemId:'i2',targetId:'t1'}]})));
+  assert.equal(result.needsReview,true);assert.equal(result.verified,false);
+  await assert.rejects(solveQuestion(matchingInput,config(async()=>providerResponse({...matchingAnswer,matches:'invalid'}))),{code:'invalid_provider_response'});
+  assert.throws(()=>validateSolveInput({...matchingInput,question:{...matchingInput.question,targets:[{id:'t1',text:'واحد'}]}}),{code:'invalid_request'});
+});

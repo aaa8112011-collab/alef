@@ -176,3 +176,15 @@ test('server check shows local model readiness without paid credentials and prec
     assert.deepEqual(harness.errors,[]);
   }finally{await harness.close();}
 });
+
+test('course queue and nonblocking lesson review retain automatic run controls',async()=>{
+ const harness=await dashboardHarness({connected:true});
+ try{
+  const {page}=harness;await page.locator('#subjects button').first().click();await page.locator('#start').click();
+  await page.evaluate(()=>__uiTest.emit({kind:'queue',message:'فحص الدروس',stats:{solved:0,review:0,total:0,lessonsTotal:2,lessonsCompleted:0,lessonsReview:0},queue:[{id:'one',name:'القراءة',status:'running'},{id:'two',name:'القواعد',status:'pending'},{id:'locked',name:'درس مقفل',status:'locked'}],currentLesson:{name:'القراءة'},timestamp:Date.now()}));
+  assert.equal(await page.locator('#course-progress').isVisible(),true);assert.equal(await page.locator('#lesson-queue li').count(),3);assert.equal(await page.locator('#lesson-count').textContent(),'0 / 2');await capture(page,'dashboard-course');
+  await page.evaluate(()=>__uiTest.emit({kind:'review',blocking:false,message:'درس يحتاج مراجعة؛ متابعة التالي',stats:{solved:0,review:1,total:1,lessonsTotal:2,lessonsCompleted:0,lessonsReview:1},queue:[{id:'one',name:'القراءة',status:'review'},{id:'two',name:'القواعد',status:'running'}],timestamp:Date.now()}));
+  assert.equal(await page.locator('#stop').isEnabled(),true);assert.equal(await page.locator('#start').isDisabled(),true);assert.equal(await page.locator('#skip-instruction').isDisabled(),true);
+  assert.deepEqual(harness.errors,[]);
+ }finally{await harness.close();}
+});

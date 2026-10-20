@@ -56,7 +56,7 @@ async function workerBridge(harness, fetchImpl) {
 async function waitUntil(predicate, message, timeout = 10000) {
   const deadline = Date.now() + timeout;
   while (!predicate()) {
-    if (Date.now() >= deadline) assert.fail(message);
+    if (Date.now() >= deadline) assert.fail(typeof message==='function'?message():message);
     await new Promise(resolve => setTimeout(resolve, 30));
   }
 }
@@ -385,4 +385,121 @@ test('worker rejects external service destinations and unrelated website origins
   worker.setTabUrl('https://example.com/');
   const unrelated = await worker.send({ type: 'CONNECT' });
   assert.equal(unrelated.ok, false);
+});
+
+test('actual Alef subject-card and recommended level-card selectors are recognized',async t=>{
+  const h=await createBrowserHarness();t.after(()=>h.close());
+  await h.page.evaluate(()=>{document.body.innerHTML='<main><div data-testid="subject-card" id="pathway-subject-cards-math" role="button"><h2 data-testid="subject-title">Math Grade 7</h2></div></main>';});
+  const scan=await h.send({type:'ALEF_SCAN'});assert.equal(scan.subjects[0].name,'Math Grade 7');
+  await h.page.evaluate(()=>{document.querySelector('main').innerHTML='<div data-testid="levels-container"><div data-testid="level-card-container-level1"><h2 data-testid="level-title">الكسور</h2></div><div data-testid="level-card-container-level2"><h2 data-testid="level-title">النسب</h2></div></div>';});
+  const levels=await h.send({type:'ALEF_INSPECT'});assert.equal(levels.stage,'lessons');assert.equal(levels.lessons.length,2);assert.equal(levels.lessons[0].kind,'level');
+});
+test('actual Alef hidden radio controls use selected choice cards and submit the visible answer',async t=>{
+  const h=await createBrowserHarness();t.after(()=>h.close());
+  await h.page.evaluate(()=>{
+    document.body.innerHTML='<main><div data-testid="question-renderer"><div data-testid="question-renderer-Q1"><div data-testid="multiple-choice-question-prompt">ما ناتج 6 × 7؟</div><div data-testid="choice-item"><div class="choice"><input type="radio" id="a" style="display:none">36</div></div><div data-testid="choice-item"><div class="choice"><input type="radio" id="b" style="display:none">42</div></div></div></div><button id="submit">Submit answer</button></main>';
+    document.querySelectorAll('[data-testid="choice-item"]').forEach(node=>node.onclick=()=>{document.querySelectorAll('.choice').forEach(choice=>choice.classList.remove('selected'));node.querySelector('.choice').classList.add('selected');});
+    window.sent=0;document.querySelector('#submit').onclick=()=>window.sent++;
+  });
+  const q=await currentQuestion(h);assert.equal(q.type,'single');assert.equal(q.options.length,2);
+  const applied=await apply(h,q,answer(['b']));assert.equal(applied.submitted,true,JSON.stringify(applied));assert.equal(await h.page.evaluate(()=>window.sent),1);
+});
+test('native dropdown options are read and applied with real change events',async t=>{
+  const h=await openMath(t);
+  await h.page.evaluate(()=>{document.querySelector('main').innerHTML='<section data-alef-question="dropdown"><h2>اختر عاصمة فرنسا.</h2><select><option value="" disabled>اختر</option><option value="paris">باريس</option><option value="rome">روما</option></select><button data-alef-submit>Submit answer</button></section>';window.changes=0;document.querySelector('select').onchange=()=>window.changes++;});
+  const q=await currentQuestion(h);assert.equal(q.type,'single');assert.equal(q.options.length,2);
+  assert.equal((await apply(h,q,answer(['paris']))).submitted,true);assert.equal(await h.page.locator('select').inputValue(),'paris');assert.equal(await h.page.evaluate(()=>window.changes),1);
+});
+test('custom dropdown expands hidden choices and confirms selected label before submit',async t=>{
+  const h=await openMath(t);
+  await h.page.evaluate(()=>{
+    document.querySelector('main').innerHTML='<section data-alef-question="custom-dropdown"><h2>اختر العدد الزوجي.</h2><div data-testid="selectableChoice"><input role="combobox" aria-label="blankField"><span id="selected-label"></span></div><button data-alef-submit>Submit answer</button></section>';
+    const combo=document.querySelector('[role="combobox"]');combo.onkeydown=e=>{
+      if(e.key==='Escape'){document.querySelector('[role="listbox"]')?.remove();return;}
+      if(e.key!=='ArrowDown'||document.querySelector('[role="listbox"]'))return;
+      const menu=document.createElement('div');menu.setAttribute('role','listbox');for(const text of ['3','4']){const option=document.createElement('div');option.setAttribute('role','option');option.textContent=text;option.onclick=()=>{document.querySelector('#selected-label').textContent=text;menu.remove();};menu.append(option);}document.body.append(menu);
+    };
+  });
+  let inspected=await h.send({type:'ALEF_INSPECT'});assert.equal(inspected.needsPreparation,true);
+  const prepared=await h.send({type:'ALEF_PREPARE_QUESTION'});assert.equal(prepared.ok,true,JSON.stringify(prepared));
+  const q=await currentQuestion(h),correct=q.options.find(option=>option.text==='4');assert.ok(correct);
+  const result=await apply(h,q,answer([correct.id]));assert.equal(result.submitted,true,JSON.stringify(result));assert.equal(await h.page.locator('#selected-label').textContent(),'4');
+});
+test('matching pairs use actual Alef click controls and require UI acknowledgement',async t=>{
+  const h=await openMath(t);
+  await h.page.evaluate(()=>{
+    document.querySelector('main').innerHTML='<section data-alef-question="matching"><h2>صل كل عدد باسمه.</h2><div data-testid="matching-choice-i1"><div>1</div></div><div data-testid="matching-choice-i2"><div>2</div></div><div data-testid="matching-answer-t1"><div>واحد</div></div><div data-testid="matching-answer-t2"><div>اثنان</div></div><button data-alef-submit>Submit answer</button></section>';
+    window.pairs=[];let current;
+    document.querySelectorAll('[data-testid^="matching-choice-"]').forEach(node=>node.firstElementChild.onclick=()=>{current=node;});
+    document.querySelectorAll('[data-testid^="matching-answer-"]').forEach(node=>node.firstElementChild.onclick=()=>{if(current){current.classList.add('selected');node.classList.add('selected');window.pairs.push([current.dataset.testid,node.dataset.testid]);current=null;}});
+  });
+  const q=await currentQuestion(h);assert.equal(q.type,'matching');
+  const result=await apply(h,q,{...answer(),matches:[{itemId:'i1',targetId:'t1'},{itemId:'i2',targetId:'t2'}]});
+  assert.equal(result.submitted,true,JSON.stringify(result));assert.equal((await h.page.evaluate(()=>window.pairs)).length,2);
+});
+test('text token drag/drop only submits when the target confirms the dropped token',async t=>{
+  const h=await openMath(t);
+  await h.page.evaluate(()=>{
+    document.querySelector('main').innerHTML='<section data-alef-question="drag"><h2>ضع الإجابة في المكان الصحيح.</h2><div data-alef-item="item1" draggable="true">مثلث</div><div data-alef-target="target1" data-target-label="شكل له ثلاثة أضلاع">شكل له ثلاثة أضلاع</div><button data-alef-submit>Submit answer</button></section>';
+    document.querySelector('[data-alef-target]').ondrop=e=>{e.preventDefault();e.currentTarget.dataset.selectedItem=e.dataTransfer.getData('text/plain');};
+  });
+  const q=await currentQuestion(h);const result=await apply(h,q,{...answer(),matches:[{itemId:'item1',targetId:'target1'}]});assert.equal(result.submitted,true,JSON.stringify(result));
+});
+test('intro skip labels and actual practice shortcut are available navigation controls',async t=>{
+  const h=await openMath(t);
+  await h.page.evaluate(()=>{document.querySelector('main').innerHTML='<section data-testid="content-page"><div data-testid="content-page-body-player">شرح</div><button>I’ll try later</button><li id="skill-player-practice">Ready for questions?</li></section>';});
+  const snapshot=await h.send({type:'ALEF_INSPECT'});assert.equal(snapshot.stage,'instruction');assert.ok(snapshot.navigation.some(action=>action.kind==='skip'));assert.ok(snapshot.navigation.some(action=>action.id==='skill-player-practice'));
+});
+
+test('Arabic passages retain diacritics and are combined with their comprehension question',async t=>{
+  const h=await openMath(t);
+  await h.page.evaluate(()=>{
+    document.querySelector('main').innerHTML='<section data-alef-question="arabic"><div data-testid="question-passage-content">نَامَتِ القِطَّةُ تَحْتَ الشَّجَرَةِ.</div><h2 data-alef-question-text>أَيْنَ نَامَتِ القِطَّةُ؟</h2><label data-alef-option="tree"><input type="radio" name="arabic">تَحْتَ الشَّجَرَةِ</label><label data-alef-option="house"><input type="radio" name="arabic">فِي البَيْتِ</label><button data-alef-submit>إرسال الإجابة</button></section>';
+  });
+  const q=await currentQuestion(h);assert.ok(q.text.includes('نَامَتِ القِطَّةُ تَحْتَ الشَّجَرَةِ.'));assert.ok(q.text.includes('أَيْنَ نَامَتِ القِطَّةُ؟'));assert.equal(q.options[0].text,'تَحْتَ الشَّجَرَةِ');assert.equal((await apply(h,q,answer(['tree']))).submitted,true);
+});
+test('collapsed Arabic reading passage is opened before the model receives a question',async t=>{
+  const h=await openMath(t);
+  await h.page.evaluate(()=>{
+    document.querySelector('main').innerHTML='<section data-alef-question="arabic-passage"><button data-alef-passage-toggle aria-expanded="false">اقرأ النص</button><div data-testid="question-passage-content" hidden>زَرَعَ سَالِمٌ شَجَرَةً.</div><h2>مَاذَا زَرَعَ سَالِمٌ؟</h2><label><input type="radio" name="ar" value="tree">شَجَرَةً</label><label><input type="radio" name="ar" value="flower">وَرْدَةً</label></section>';
+    document.querySelector('[data-alef-passage-toggle]').onclick=e=>{e.currentTarget.setAttribute('aria-expanded','true');document.querySelector('[data-testid="question-passage-content"]').hidden=false;};
+  });
+  const before=await h.send({type:'ALEF_INSPECT'});assert.equal(before.needsPreparation,true);assert.equal(before.question,null);
+  const prepared=await h.send({type:'ALEF_PREPARE_QUESTION'});assert.equal(prepared.ok,true,JSON.stringify(prepared));assert.ok(prepared.question.text.includes('زَرَعَ سَالِمٌ شَجَرَةً.'));
+});
+
+test('actual Alef drag-word blanks use their supported click placement and preserve the question fingerprint',async t=>{
+ const h=await openMath(t);
+ await h.page.evaluate(()=>{
+   document.querySelector('main').innerHTML='<section data-alef-question="fill-drag"><h2>ضع الكلمة المناسبة.</h2><p>النبات يحتاج <span data-testid="fill-blank-dd-blank1"></span>.</p><div data-testid="draggableChoice">ماء</div><div data-testid="draggableChoice">حديد</div><button data-alef-submit>Submit answer</button></section>';
+   let selected;document.querySelectorAll('[data-testid="draggableChoice"]').forEach(node=>node.onclick=()=>{selected=node;});
+   document.querySelector('[data-testid^="fill-blank-dd-"]').onclick=e=>{if(selected){e.currentTarget.textContent=selected.textContent;selected.remove();selected=null;}};
+ });
+ const q=await currentQuestion(h);assert.equal(q.type,'matching');const target=q.targets.find(item=>item.text==='ماء');
+ const result=await apply(h,q,{...answer(),matches:[{itemId:q.items[0].id,targetId:target.id}]});assert.equal(result.submitted,true,JSON.stringify(result));
+});
+
+test('real choice feedback with disabled inputs advances once and does not solve the same question again',async t=>{
+ const h=await createBrowserHarness();t.after(()=>h.close());
+ await h.page.evaluate(()=>{
+  document.body.innerHTML='<button data-alef-subject="math">الرياضيات</button><main></main>';
+  document.querySelector('button').onclick=()=>{
+   document.querySelector('main').innerHTML='<div data-testid="question-renderer"><div data-testid="question-renderer-realQ"><div data-testid="multiple-choice-question-prompt">ما ناتج 6 × 7؟</div><div data-testid="choice-item"><div class="choice"><input type="radio" id="a" style="display:none">36</div></div><div data-testid="choice-item"><div class="choice"><input type="radio" id="b" style="display:none">42</div></div></div></div><button id="submit-real">Submit answer</button>';
+   document.querySelectorAll('[data-testid="choice-item"]').forEach(node=>node.onclick=()=>{document.querySelectorAll('.choice').forEach(choice=>choice.classList.remove('selected'));node.querySelector('.choice').classList.add('selected');});
+   document.querySelector('#submit-real').onclick=e=>{e.currentTarget.disabled=true;document.querySelectorAll('input').forEach(input=>{input.disabled=true;});const feedback=document.createElement('p');feedback.textContent='إجابة صحيحة';document.querySelector('[data-testid="question-renderer"]').append(feedback);const next=document.createElement('button');next.textContent='Next';next.onclick=()=>{document.querySelector('main').innerHTML='<section data-alef-completed>Lesson completed</section>';};document.querySelector('main').append(next);};
+  };
+ });
+ let calls=0;const worker=await workerBridge(h,(url,options)=>{calls++;return fixtureProvider(url,options);});
+ assert.equal((await worker.send({type:'CONNECT'})).ok,true);assert.equal((await worker.send({type:'START',subjectId:'math',config:runConfig()})).ok,true);
+ await waitUntil(()=>worker.events.some(item=>item.event.kind==='complete'),()=>JSON.stringify(worker.events));assert.equal(calls,1);
+});
+test('STOP message interrupts asynchronous matching before submit',async t=>{
+ const h=await openMath(t);
+ await h.page.evaluate(()=>{
+  document.querySelector('main').innerHTML='<section data-alef-question="cancel-matching"><h2>صل العدد باسمه.</h2><div data-testid="matching-choice-i1"><div>1</div></div><div data-testid="matching-answer-t1"><div>واحد</div></div><button data-alef-submit>Submit answer</button></section>';
+  window.matchStarted=false;window.matchSubmitted=0;document.querySelector('[data-testid="matching-choice-i1"]').firstElementChild.onclick=()=>{window.matchStarted=true;};document.querySelector('[data-alef-submit]').onclick=()=>window.matchSubmitted++;
+ });
+ const q=await currentQuestion(h);const pending=apply(h,q,{...answer(),matches:[{itemId:'i1',targetId:'t1'}]});
+ await h.page.waitForFunction(()=>window.matchStarted);await h.send({type:'ALEF_CANCEL'});
+ const result=await pending;assert.equal(result.ok,false);assert.equal(await h.page.evaluate(()=>window.matchSubmitted),0);
 });

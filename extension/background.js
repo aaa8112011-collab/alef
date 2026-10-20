@@ -14,8 +14,9 @@ const allowedOrigin = url => {
       (parsed.protocol === 'http:' && ['localhost','127.0.0.1'].includes(parsed.hostname));
   } catch { return false; }
 };
+const freshStats = () => ({solved:0,review:0,total:0,lessonsCompleted:0,lessonsTotal:0,lessonsReview:0});
 const freshState = () => ({running:false,status:'idle',page:null,subjects:[],subjectId:null,
-  stats:{solved:0,review:0,total:0},events:[],lastEvent:null});
+  queue:[],currentLesson:null,catalogURL:null,stats:freshStats(),events:[],lastEvent:null});
 const key = tabId => `alef:run:${tabId}`;
 const aborted = () => new DOMException('تم إيقاف التشغيل.','AbortError');
 function assertActive(signal) { if (signal.aborted) throw aborted(); }
@@ -30,11 +31,14 @@ function pause(ms,signal) {
 async function getState(tabId) {
   if (!states.has(tabId)) {
     const stored = (await chrome.storage.session.get(key(tabId)))[key(tabId)] || freshState();
+    stored.stats = {...freshStats(),...stored.stats};
+    stored.queue ||= [];
+    stored.currentLesson ||= null;
     if (stored.running && !runs.has(tabId)) {
       stored.running = false;
       stored.status = 'interrupted';
       stored.lastEvent = {kind:'stopped',message:'انقطعت جلسة الإضافة. افحص الصفحة ثم ابدأ مجددًا.',timestamp:Date.now(),stats:stored.stats};
-      stored.events.push(stored.lastEvent);
+      (stored.events ||= []).push(stored.lastEvent);
     }
     states.set(tabId,stored);
   }
@@ -46,9 +50,13 @@ async function saveState(tabId) {
 async function emit(tabId,kind,message,details={}) {
   const state = await getState(tabId);
   const event = {kind,message,...details,stats:{...state.stats},timestamp:Date.now()};
+  if (state.currentLesson) event.currentLesson = {...state.currentLesson};
+  if (['queue','lesson','complete','review','error','stopped'].includes(kind)) {
+    event.queue = state.queue.map(item=>({...item}));
+  }
   state.lastEvent = event;
   state.events = [...state.events,event].slice(-100);
-  if (['complete','error','stopped','review'].includes(kind)) {
+  if (['complete','error','stopped'].includes(kind) || (kind === 'review' && details.blocking !== false)) {
     state.status = kind;
     state.running = false;
   }
@@ -61,8 +69,8 @@ function checkedTabId(value) {
 }
 async function checkedTab(tabId,origin) {
   const tab = await chrome.tabs.get(tabId);
-  if (!allowedOrigin(tab.url)) throw new Error('افتح https://moe.alefed.com/ أولًا؛ الربط متاح لموقع ألف فقط.');
-  if (origin && new URL(tab.url).origin !== origin) throw new Error('انتقلت الصفحة خارج الموقع المرتبط. أوقف التشغيل وأعد الربط.');
+  if (!allowedOrigin(tab.url)) throw Object.assign(new Error('افتح https://moe.alefed.com/ أولًا؛ الربط متاح لموقع ألف فقط.'),{fatal:true});
+  if (origin && new URL(tab.url).origin !== origin) throw Object.assign(new Error('انتقلت الصفحة خارج الموقع المرتبط. أوقف التشغيل وأعد الربط.'),{fatal:true});
   return tab;
 }
 async function inject(tabId,origin) {
@@ -77,13 +85,13 @@ async function pageMessage(tabId,message,origin,signal) {
   try { result = await chrome.tabs.sendMessage(tabId,message); }
   catch (error) {
     if (signal) assertActive(signal);
-    if (['ALEF_APPLY','ALEF_SELECT_SUBJECT','ALEF_NEXT'].includes(message.type)) {
+    if (['ALEF_APPLY','ALEF_SELECT_SUBJECT','ALEF_NEXT','ALEF_OPEN_LESSON','ALEF_NAVIGATE'].includes(message.type)) {
       // A navigation can close the response channel after a click already happened.
       // Never replay a mutation: doing so could submit an answer twice.
       await checkedTab(tabId,origin);
       if (message.type === 'ALEF_SELECT_SUBJECT') return {ok:true,selected:true};
-      if (message.type === 'ALEF_NEXT') return {ok:true,clicked:true};
-      throw new Error('انقطع الاتصال أثناء تطبيق الإجابة. تحقق من آخر إرسال في ألف قبل إعادة البدء.');
+      if (['ALEF_NEXT','ALEF_OPEN_LESSON','ALEF_NAVIGATE'].includes(message.type)) return {ok:true,clicked:true,uncertain:true};
+      throw Object.assign(new Error('انقطع الاتصال أثناء تطبيق الإجابة. تحقق من آخر إرسال في ألف قبل إعادة البدء.'),{fatal:true});
     }
     await inject(tabId,origin);
     result = await chrome.tabs.sendMessage(tabId,message);
@@ -104,7 +112,7 @@ function checkedConfig(input) {
     throw new Error('عنوان الخادم يجب أن يكون محليًا مثل http://127.0.0.1:4318.');
   }
   const selectors = {};
-  for (const name of ['subject','question','option','submit','next','completed']) {
+  for (const name of ['subject','lesson','question','option','submit','next','completed','skip','assessment','nextLesson','back','finish']) {
     if (input.selectors?.[name] !== undefined) {
       if (typeof input.selectors[name] !== 'string' || input.selectors[name].length > 600) throw new Error('محدد الصفحة غير صالح.');
       selectors[name] = input.selectors[name];
@@ -113,7 +121,7 @@ function checkedConfig(input) {
   const confidence = Number(input.minConfidence ?? 0.85);
   if (!Number.isFinite(confidence) || confidence < 0.85 || confidence > 1) throw new Error('حد الثقة يجب أن يكون بين 0.85 و1.');
   return {serverUrl:url.origin,token:input.token.trim(),selectors,verify:input.verify !== false,
-    autoSubmit:input.autoSubmit !== false,minConfidence:confidence};
+    autoSubmit:input.autoSubmit !== false,skipInstruction:input.skipInstruction !== false,minConfidence:confidence};
 }
 async function connect(tabId,selectors) {
   if (runs.has(tabId)) throw new Error('أوقف التشغيل قبل إعادة ربط الصفحة.');
@@ -126,35 +134,59 @@ async function connect(tabId,selectors) {
   await saveState(tabId);
   return {...snapshot,state};
 }
-async function read(tabId,config,origin,signal) {
-  return pageMessage(tabId,{type:'ALEF_GET_QUESTION',selectors:config.selectors},origin,signal);
+async function inspect(tabId,config,origin,signal) {
+  return pageMessage(tabId,{type:'ALEF_INSPECT',selectors:config.selectors},origin,signal);
 }
-async function waitForChange(tabId,config,origin,signal,previous=null,timeout=15000) {
-  const start = Date.now();
+const snapshotKey = snapshot => snapshot?.fingerprint || JSON.stringify([
+  snapshot?.stage,snapshot?.question?.id,snapshot?.question?.fingerprint,snapshot?.completed,
+  snapshot?.lessons?.map(item=>[item.id,item.locked,item.completed]),snapshot?.navigation?.map(item=>[item.id,item.kind]),
+]);
+const sameQuestion = (snapshot,question) => snapshot?.question?.id === question.id &&
+  snapshot.question.fingerprint === question.fingerprint;
+async function waitSnapshot(tabId,config,origin,signal,predicate=()=>true,timeout=12000) {
+  const started = Date.now();
   let last;
-  let nextClicked = false;
-  while (Date.now()-start < timeout) {
+  while (Date.now()-started < timeout) {
     assertActive(signal);
     try {
-      last = await read(tabId,config,origin,signal);
-      if (last.completed || (last.question && (!previous || last.question.fingerprint !== previous.fingerprint || last.question.id !== previous.id))) return last;
-      if (previous && last.canNext && !nextClicked) {
-        await pageMessage(tabId,{type:'ALEF_NEXT',selectors:config.selectors},origin,signal);
-        nextClicked = true;
-        await pause(350,signal);
-        const after = await read(tabId,config,origin,signal);
-        if (after.completed || (after.question && (after.question.id !== previous.id || after.question.fingerprint !== previous.fingerprint))) return after;
-        // Never click an unchanged Next button repeatedly.
-        last = after;
-      }
+      last = await inspect(tabId,config,origin,signal);
+      if (predicate(last)) return last;
     } catch (error) {
       if (signal.aborted) throw aborted();
-      // Loading/replaced documents can briefly have no message receiver.
-      if (!/Receiving end does not exist|Could not establish connection|Frame.*removed|Cannot access contents|No frame with id/i.test(error.message)) throw error;
+      if (error.fatal || !/Receiving end does not exist|Could not establish connection|Frame.*removed|Cannot access contents|No frame with id/i.test(error.message)) throw error;
     }
-    await pause(300,signal);
+    await pause(250,signal);
   }
-  return last || {question:null,completed:false};
+  return last || {stage:'unknown',question:null,completed:false,navigation:[],lessons:[]};
+}
+function diagnostic(snapshot,fallback) {
+  return snapshot?.diagnostics?.find(item=>typeof item === 'string' && item.trim()) || fallback;
+}
+async function navigate(tabId,snapshot,action,config,origin,signal) {
+  return pageMessage(tabId,{type:'ALEF_NAVIGATE',actionId:action.id,
+    fingerprint:snapshot.fingerprint,selectors:config.selectors},origin,signal);
+}
+async function afterSubmission(tabId,question,config,origin,signal) {
+  const started = Date.now();
+  const clicked = new Set();
+  let last;
+  while (Date.now()-started < 15000) {
+    assertActive(signal);
+    last = await inspect(tabId,config,origin,signal);
+    if (last.feedback==='wrong')return last;
+    if (last.completed || last.stage === 'complete' || last.stage === 'lessons' ||
+      (last.question&&last.question.id!==question.id)||last.stage==='instruction'||last.needsPreparation) return last;
+    const action = last.navigation?.find(item=>['next','finish'].includes(item.kind));
+    if (action) {
+      const identity = `${snapshotKey(last)}:${action.id}`;
+      if (!clicked.has(identity)) {
+        clicked.add(identity);
+        await navigate(tabId,last,action,config,origin,signal);
+      }
+    }
+    await pause(250,signal);
+  }
+  return last || {stage:'unknown',question:null,completed:false};
 }
 async function solve(question,subject,config,signal) {
   // Local models can take minutes on a CPU. Stop still aborts immediately.
@@ -163,7 +195,7 @@ async function solve(question,subject,config,signal) {
   try {
     response = await fetch(`${config.serverUrl}/api/solve`,{
       method:'POST',headers:{'Content-Type':'application/json','Authorization':`Bearer ${config.token}`},
-      body:JSON.stringify({subject,question:{id:question.id,text:question.text,type:question.type,options:question.options},verify:config.verify}),
+      body:JSON.stringify({subject,question:{id:question.id,text:question.text,type:question.type,options:question.options,...(question.type==='matching'?{items:question.items,targets:question.targets}:{})},verify:config.verify}),
       signal:AbortSignal.any([signal,timeout]),
     });
   } catch (error) {
@@ -178,6 +210,153 @@ async function solve(question,subject,config,signal) {
   if (!result || typeof result !== 'object') throw new Error('الخادم لم يُرجع إجابة قابلة للقراءة.');
   return result;
 }
+function updateQueue(state,snapshot) {
+  for (const lesson of snapshot.lessons || []) {
+    if (!lesson?.id || !lesson.name) continue;
+    let item = state.queue.find(row=>row.id===lesson.id);
+    const available = lesson.locked ? 'locked' : lesson.completed ? 'alreadycompleted' : 'pending';
+    if (!item) {
+      if (state.queue.length >= 250) continue;
+      item = {id:lesson.id,name:lesson.name,status:available};
+      state.queue.push(item);
+    } else if (['pending','locked','alreadycompleted'].includes(item.status)) {
+      item.status = available;
+      item.name = lesson.name;
+    }
+    if (lesson.href) item.href = lesson.href;
+  }
+  state.stats.lessonsTotal = state.queue.filter(item=>!['locked','alreadycompleted'].includes(item.status)).length;
+}
+async function runLesson(tabId,subject,initial,lesson,config,origin,signal,state) {
+  let snapshot = initial;
+  let introActions = 0;
+  const seenQuestions = new Set();
+  const clicked = new Set();
+  const rejectedAnswers = new Map();
+  let lastSubmitted = null;
+  const answerKey=answer=>answer.optionIds?.length?JSON.stringify([...answer.optionIds].sort()):answer.matches?JSON.stringify([...answer.matches].sort((a,b)=>a.itemId.localeCompare(b.itemId))):(answer.text||'').normalize('NFKC').trim();
+  while (true) {
+    assertActive(signal);
+    if (snapshot.completed || snapshot.stage === 'complete' ||
+      (snapshot.stage === 'lessons' && snapshot.lessons?.some(item=>item.id===lesson.id && item.completed))) {
+      return {completed:true,snapshot};
+    }
+    if(snapshot.stage==='lessons') {
+      // A Pathways level contains several learning activities sharing one level
+      // assessment. Enter one available activity, then use the visible Practice
+      // control. The outer queue advances to the next level after completion.
+      const child=snapshot.lessons?.find(item=>!item.locked&&!item.completed);
+      if(!child)return {review:true,snapshot,message:'لا يوجد نشاط مفتوح يوصل إلى تدريب هذا المستوى.'};
+      const step=`child:${snapshot.fingerprint}:${child.id}`;
+      if(clicked.has(step))return {review:true,snapshot,message:'لم يفتح نشاط المستوى؛ أوقف تكرار الضغط.'};
+      clicked.add(step);
+      await pageMessage(tabId,{type:'ALEF_OPEN_LESSON',lessonId:child.id,fingerprint:snapshot.fingerprint,selectors:config.selectors},origin,signal);
+      const before=snapshotKey(snapshot);
+      snapshot=await waitSnapshot(tabId,config,origin,signal,item=>snapshotKey(item)!==before&&item.stage!=='unknown');
+      continue;
+    }
+    if(snapshot.needsPreparation) {
+      await pageMessage(tabId,{type:'ALEF_PREPARE_QUESTION',selectors:config.selectors},origin,signal);
+      snapshot=await inspect(tabId,config,origin,signal);
+      if(snapshot.needsPreparation)return {review:true,snapshot,message:'لم تظهر خيارات القائمة المنسدلة بوضوح.'};
+      continue;
+    }
+    if(snapshot.feedback==='wrong'){
+      const q=snapshot.question;
+      const identity=q&&`${q.id}:${q.fingerprint}`;
+      const rejected=rejectedAnswers.get(identity)||[];
+      const retry=snapshot.navigation?.find(action=>action.kind==='retry');
+      if(!q||!lastSubmitted||lastSubmitted.question.id!==q.id||rejected.length>=2||!retry)return {review:true,snapshot,message:'لم يُقبل الحل بعد المحاولات المتاحة. سُجّل الدرس للمراجعة بدل تكرار الإجابة.'};
+      rejected.push(lastSubmitted.answer);rejectedAnswers.set(identity,rejected);
+      await emit(tabId,'status','رفض الموقع الإجابة؛ إعادة التحقق مع استبعاد الحل المرفوض…');
+      await navigate(tabId,snapshot,retry,config,origin,signal);
+      snapshot=await waitSnapshot(tabId,config,origin,signal,item=>item.stage==='question'&&item.feedback!=='wrong',6000);
+      seenQuestions.delete(identity);
+      continue;
+    }
+    if (snapshot.stage === 'question' && snapshot.question) {
+      const question = snapshot.question;
+      const identity = `${question.id}:${question.fingerprint}`;
+      if (seenQuestions.has(identity)) return {review:true,snapshot,message:'لم ينتقل الموقع إلى سؤال جديد. راجع نتيجة آخر إرسال.'};
+      if (state.stats.total >= 1000) return {review:true,blocking:true,snapshot,message:'وصل التشغيل إلى حد 1000 سؤال. افحص التقدم ثم ابدأ جلسة جديدة.'};
+      seenQuestions.add(identity);
+      state.stats.total++;
+      await emit(tabId,'question','جارٍ حل السؤال والتحقق من الإجابة…',{question});
+      let result;
+      const rejected=rejectedAnswers.get(identity)||[];
+      const requestQuestion=rejected.length?{...question,text:question.text+'\n\nPlatform feedback: these previous answers were rejected. Re-evaluate the question carefully. Do not repeat a rejected answer; lower confidence if the question is unclear.\n'+JSON.stringify(rejected.map(answer=>({optionIds:answer.optionIds,text:answer.text,matches:answer.matches})))}:question;
+      try { result = await solve(requestQuestion,subject.name,config,signal); }
+      catch (error) { error.fatal = true;throw error; }
+      assertActive(signal);
+      const answer = result.answer;
+      if(answer&&rejected.some(previous=>answerKey(previous)===answerKey(answer)))return {review:true,snapshot,question,answer,message:'عاد النموذج إلى إجابة سبق رفضها؛ لم تُرسل مرة أخرى.'};
+      if (result.needsReview || !answer || !Number.isFinite(answer.confidence) || answer.confidence < config.minConfidence || (config.verify && result.verified !== true)) {
+        return {review:true,snapshot,question,answer,message:reviewMessages[result.reason] ||
+          'الإجابة تحتاج مراجعة: الثقة منخفضة أو لم تتفق عمليتا الحل والتحقق.'};
+      }
+      await emit(tabId,'answer','وصلت الإجابة؛ جارٍ مطابقتها مع السؤال الظاهر.',{question,answer});
+      assertActive(signal);
+      const applied = await pageMessage(tabId,{type:'ALEF_APPLY',questionId:question.id,
+        questionFingerprint:question.fingerprint,answer,selectors:config.selectors,autoSubmit:config.autoSubmit},origin,signal);
+      if (!applied.submitted) {
+        return {review:true,blocking:true,snapshot,question,answer,message:applied.reason ||
+          'تم اختيار الإجابة. راجعها وأرسلها يدويًا؛ الإرسال التلقائي متوقف.'};
+      }
+      state.stats.solved++;
+      lastSubmitted={question,answer};
+      await emit(tabId,'status','أُرسلت الإجابة. انتظار السؤال التالي…');
+      await pause(300,signal);
+      snapshot = await afterSubmission(tabId,question,config,origin,signal);
+      continue;
+    }
+    if (snapshot.stage === 'instruction') {
+      const kinds = config.skipInstruction ? ['skip','assessment','next','finish'] : ['assessment','next','finish'];
+      const action = kinds.map(kind=>snapshot.navigation?.find(item=>item.kind===kind)).find(Boolean);
+      if (!action) return {review:true,snapshot,message:diagnostic(snapshot,'يتطلب هذا الدرس مشاهدة أو تفاعلًا لا يمكن تجاوزه بزر ظاهر. يحتاج مراجعة يدوية.')};
+      const identity = `${snapshotKey(snapshot)}:${action.id}`;
+      if (clicked.has(identity)) return {review:true,snapshot,message:'لم يتغير الدرس بعد الانتقال. أوقف تكرار الضغط لمراجعة الصفحة.'};
+      if (introActions >= 12) return {review:true,snapshot,message:'وصل الدرس إلى حد خطوات المقدمة. راجع المحتوى قبل المتابعة.'};
+      clicked.add(identity);
+      introActions++;
+      await emit(tabId,'status',action.kind === 'skip' ? 'تجاوز المقدمة بالزر الظاهر في الدرس…' : 'الانتقال إلى نشاط الدرس…');
+      const previous = snapshotKey(snapshot);
+      await navigate(tabId,snapshot,action,config,origin,signal);
+      snapshot = await waitSnapshot(tabId,config,origin,signal,item=>snapshotKey(item)!==previous && item.stage!=='unknown');
+      continue;
+    }
+    return {review:true,snapshot,message:diagnostic(snapshot,
+      snapshot.stage === 'question' ? 'السؤال الظاهر يحتاج تفاعلًا غير مدعوم. لم تُرسل إجابة.' :
+        'لم أجد سؤالًا أو خطوة انتقال مدعومة في هذا الدرس. يحتاج مراجعة يدوية.')};
+  }
+}
+async function returnToCatalog(tabId,config,origin,signal,state,previous) {
+  let snapshot = previous || await inspect(tabId,config,origin,signal);
+  const isCatalog=item=>item?.stage==='lessons'&&item.lessons?.some(lesson=>state.queue.some(row=>row.id===lesson.id));
+  if (isCatalog(snapshot)) return snapshot;
+  const back = snapshot.navigation?.find(item=>item.kind==='back');
+  if (back) {
+    await emit(tabId,'status','العودة إلى قائمة دروس المادة…');
+    await navigate(tabId,snapshot,back,config,origin,signal);
+    snapshot = await waitSnapshot(tabId,config,origin,signal,item=>['lessons','subjects'].includes(item.stage),6000);
+    if (isCatalog(snapshot)) return snapshot;
+    if (snapshot.stage === 'subjects' && snapshot.subjects?.some(item=>item.id===state.subjectId)) {
+      await pageMessage(tabId,{type:'ALEF_SELECT_SUBJECT',subjectId:state.subjectId,selectors:config.selectors},origin,signal);
+      snapshot = await waitSnapshot(tabId,config,origin,signal,item=>item.stage==='lessons',6000);
+      if (isCatalog(snapshot)) return snapshot;
+    }
+  }
+  if (!state.catalogURL) return null;
+  const tab = await checkedTab(tabId,origin);
+  const destination = new URL(state.catalogURL);
+  if (destination.origin !== origin || tab.url === destination.href) return null;
+  // This URL was observed on this subject's actual catalog. Do not use history.back
+  // or guess route names: either can leave the user's selected course.
+  assertActive(signal);
+  await chrome.tabs.update(tabId,{url:destination.href});
+  assertActive(signal);
+  snapshot = await waitSnapshot(tabId,config,origin,signal,isCatalog,12000);
+  return isCatalog(snapshot) ? snapshot : null;
+}
 async function run(tabId,subjectId,config,controller) {
   const signal = controller.signal;
   const state = await getState(tabId);
@@ -185,55 +364,92 @@ async function run(tabId,subjectId,config,controller) {
   const subject = state.subjects.find(item=>item.id===subjectId);
   const keepAlive = setInterval(()=>chrome.runtime.getPlatformInfo().catch(()=>{}),20000);
   try {
-    await emit(tabId,'status',`فتح ${subject.name} وقراءة السؤال…`);
+    await emit(tabId,'status',`فتح ${subject.name} وجمع الدروس المفتوحة…`);
     await pageMessage(tabId,{type:'ALEF_SELECT_SUBJECT',subjectId,selectors:config.selectors},origin,signal);
-    await pause(350,signal);
-    let snapshot = await waitForChange(tabId,config,origin,signal);
-    const seen = new Set();
-    for (let limit=0;limit<100;limit++) {
-      assertActive(signal);
-      if (snapshot.completed) { await emit(tabId,'complete','اكتملت الأسئلة الظاهرة لهذه المادة.');return; }
-      if (!snapshot.question) {
-        state.stats.review++;
-        await emit(tabId,'review','لم أجد سؤالًا مدعومًا. افتح الواجب المطلوب أو اضبط محددات الصفحة ثم أعد البدء.');return;
-      }
-      const question = snapshot.question;
-      const identity = `${question.id}:${question.fingerprint}`;
-      if (seen.has(identity)) {
-        state.stats.review++;
-        await emit(tabId,'review','لم ينتقل الموقع إلى سؤال جديد. راجع نتيجة الإرسال على صفحة ألف.',{question});return;
-      }
-      seen.add(identity);
-      state.stats.total++;
-      await emit(tabId,'question','جارٍ حل السؤال والتحقق من الإجابة…',{question});
-      const result = await solve(question,subject.name,config,signal);
-      assertActive(signal);
-      const answer = result.answer;
-      if (result.needsReview || !answer || !Number.isFinite(answer.confidence) || answer.confidence < config.minConfidence || (config.verify && result.verified !== true)) {
-        state.stats.review++;
-        await emit(tabId,'review',reviewMessages[result.reason] ||
-          'الإجابة تحتاج مراجعة: الثقة منخفضة أو لم تتفق عمليتا الحل والتحقق.',{question,answer});return;
-      }
-      await emit(tabId,'answer','وصلت الإجابة؛ جارٍ مطابقتها مع السؤال الظاهر.',{question,answer});
-      assertActive(signal);
-      const applied = await pageMessage(tabId,{type:'ALEF_APPLY',questionId:question.id,
-        questionFingerprint:question.fingerprint,answer,selectors:config.selectors,autoSubmit:config.autoSubmit},origin,signal);
-      if (!applied.submitted) {
-        state.stats.review++;
-        await emit(tabId,'review',applied.reason || 'تم اختيار الإجابة. راجعها وأرسلها يدويًا؛ الإرسال التلقائي متوقف.',{question,answer});return;
-      }
-      state.stats.solved++;
-      await emit(tabId,'status','أُرسلت الإجابة. انتظار السؤال التالي…');
-      await pause(500,signal);
-      snapshot = await waitForChange(tabId,config,origin,signal,question);
+    await pause(250,signal);
+    let snapshot = await waitSnapshot(tabId,config,origin,signal,item=>!['unknown','subjects'].includes(item.stage));
+    const catalogMode = snapshot.stage === 'lessons';
+    if (catalogMode) {
+      state.catalogURL = snapshot.page?.url || (await checkedTab(tabId,origin)).url;
+      updateQueue(state,snapshot);
+    } else if (['question','instruction','complete'].includes(snapshot.stage)) {
+      state.queue = [{id:'current-exercise',name:subject.name,status:'pending',implicit:true}];
+      state.stats.lessonsTotal = 1;
+    } else {
+      state.stats.review++;
+      await emit(tabId,'review',diagnostic(snapshot,'لم أجد قائمة دروس أو نشاطًا مدعومًا. افتح صفحة المادة ثم أعد الربط.'),{blocking:true});
+      return;
     }
-    state.stats.review++;
-    await emit(tabId,'review','وصل التشغيل إلى حد 100 سؤال. افحص التقدم ثم ابدأ جلسة جديدة.');
+    await emit(tabId,'queue',`عُثر على ${state.stats.lessonsTotal} درس مفتوح غير مكتمل.`);
+    for (let lessonLimit=0;lessonLimit<250;lessonLimit++) {
+      assertActive(signal);
+      const lesson = state.queue.find(item=>item.status==='pending');
+      if (!lesson) {
+        state.currentLesson = null;
+        await emit(tabId,'complete',state.stats.lessonsReview
+          ? `انتهت معالجة الدروس المتاحة. اكتمل ${state.stats.lessonsCompleted} درس، ويحتاج ${state.stats.lessonsReview} إلى مراجعة.`
+          : state.stats.lessonsCompleted ? `اكتملت الدروس المفتوحة التي أمكن الوصول إليها (${state.stats.lessonsCompleted}).`
+            : 'لا توجد دروس مفتوحة غير مكتملة في القائمة الظاهرة. الدروس المقفلة تبقى دون تغيير.');
+        return;
+      }
+      lesson.status = 'running';
+      state.currentLesson = lesson;
+      await emit(tabId,'lesson',`بدء درس: ${lesson.name}`);
+      let outcome;
+      try {
+        if (catalogMode) {
+          if (snapshot.stage !== 'lessons') snapshot = await returnToCatalog(tabId,config,origin,signal,state,snapshot);
+          if (!snapshot) throw Object.assign(new Error('تعذرت العودة الآمنة إلى قائمة الدروس. افتح قائمة المادة ثم أعد البدء.'),{fatal:true});
+          await pageMessage(tabId,{type:'ALEF_OPEN_LESSON',lessonId:lesson.id,
+            fingerprint:snapshot.fingerprint,selectors:config.selectors},origin,signal);
+          const previous = snapshotKey(snapshot);
+          snapshot = await waitSnapshot(tabId,config,origin,signal,item=>snapshotKey(item)!==previous && item.stage!=='unknown');
+        }
+        outcome = await runLesson(tabId,subject,snapshot,lesson,config,origin,signal,state);
+      } catch (error) {
+        if (signal.aborted || error.name === 'AbortError') throw error;
+        if (error.fatal) throw error;
+        outcome = {review:true,message:error.message,snapshot:await inspect(tabId,config,origin,signal)};
+      }
+      snapshot = outcome.snapshot;
+      if (outcome.completed) {
+        lesson.status = 'completed';
+        state.stats.lessonsCompleted++;
+        await emit(tabId,'lesson',`اكتمل درس: ${lesson.name}`);
+      } else {
+        lesson.status = 'review';lesson.reason = outcome.message;
+        state.stats.review++;state.stats.lessonsReview++;
+        if (outcome.blocking || !catalogMode) {
+          await emit(tabId,'review',outcome.message,{blocking:true,question:outcome.question,answer:outcome.answer});return;
+        }
+      }
+      if (!catalogMode) {
+        state.currentLesson = null;
+        await emit(tabId,'complete','اكتملت الأسئلة الظاهرة لهذا النشاط.');return;
+      }
+      const catalog = await returnToCatalog(tabId,config,origin,signal,state,snapshot);
+      if (!catalog) {
+        if (state.queue.some(item=>item.status==='pending') || !outcome.completed) {
+          await emit(tabId,'review',outcome.message || 'اكتمل الدرس الحالي، لكن تعذرت العودة الآمنة إلى بقية دروس المادة.',{blocking:true});return;
+        }
+      } else {
+        snapshot = catalog;
+        state.catalogURL = snapshot.page?.url || state.catalogURL;
+        updateQueue(state,snapshot);
+        if (!outcome.completed) await emit(tabId,'review',outcome.message,{blocking:false,question:outcome.question,answer:outcome.answer});
+        await emit(tabId,'queue','تحديث قائمة الدروس ومتابعة الدرس التالي…');
+      }
+    }
+    await emit(tabId,'review','وصل التشغيل إلى حد 250 درسًا. افحص التقدم ثم ابدأ جلسة جديدة.',{blocking:true});
   } catch (error) {
     if (signal.aborted || error.name === 'AbortError') {
       if (state.status !== 'stopped') await emit(tabId,'stopped','تم إيقاف الحل.');
     } else {
       state.stats.review++;
+      if (state.currentLesson?.status === 'running') {
+        state.currentLesson.status = 'review';state.currentLesson.reason = error.message;
+        state.stats.lessonsReview++;
+      }
       await emit(tabId,'error',error.name === 'TimeoutError' ? 'انتهت مهلة الحل. تحقق من الخادم ثم أعد المحاولة.' : error.message || 'تعذر متابعة التشغيل.');
     }
   } finally {
@@ -249,6 +465,10 @@ async function handle(message) {
     case 'CONNECT':
     case 'SCAN': return connect(tabId,message.selectors);
     case 'GET_STATE': return {ok:true,state:await getState(tabId)};
+    case 'DIAGNOSTICS': {
+      const tab=await checkedTab(tabId);
+      return pageMessage(tabId,{type:'ALEF_DIAGNOSTICS'},new URL(tab.url).origin);
+    }
     case 'START': {
       if (runs.has(tabId)) throw new Error('الحل يعمل بالفعل لهذا التبويب.');
       const config = checkedConfig(message.config);
@@ -256,7 +476,7 @@ async function handle(message) {
       if (!state.page || !state.subjects.some(item=>item.id===message.subjectId)) throw new Error('اربط صفحة ألف واختر مادة أولًا.');
       await checkedTab(tabId,new URL(state.page.url).origin);
       state.running = true;state.status='running';state.subjectId=message.subjectId;
-      state.stats={solved:0,review:0,total:0};state.events=[];state.lastEvent=null;
+      state.stats=freshStats();state.queue=[];state.currentLesson=null;state.catalogURL=null;state.events=[];state.lastEvent=null;
       const controller = new AbortController();
       runs.set(tabId,controller);
       await saveState(tabId);
@@ -266,6 +486,7 @@ async function handle(message) {
     case 'STOP': {
       const controller = runs.get(tabId);
       if (controller) controller.abort();
+      try{await chrome.tabs.sendMessage(tabId,{type:'ALEF_CANCEL'});}catch{}
       await emit(tabId,'stopped','تم إيقاف الحل. راجع صفحة ألف لمعرفة حالة آخر إرسال.');
       return {ok:true,state:await getState(tabId)};
     }
@@ -274,7 +495,7 @@ async function handle(message) {
 }
 chrome.runtime.onMessage.addListener((message,sender,respond) => {
   if (sender.id !== chrome.runtime.id || !sender.url?.startsWith(chrome.runtime.getURL('')) || message?.type === 'RUN_EVENT') return false;
-  if (!['CONNECT','SCAN','GET_STATE','START','STOP'].includes(message?.type)) return false;
+  if (!['CONNECT','SCAN','GET_STATE','START','STOP','DIAGNOSTICS'].includes(message?.type)) return false;
   handle(message).then(respond,error=>respond({ok:false,error:error.message || 'تعذر تنفيذ الطلب.'}));
   return true;
 });

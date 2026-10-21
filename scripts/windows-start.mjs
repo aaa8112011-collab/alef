@@ -26,8 +26,9 @@ function runCommand(spawnImpl, command, args, { input, visible = false, env } = 
 function localSettings(env) {
   // Local-prefixed values override old API-provider settings without editing .env.
   const model = env.SOLVER_LOCAL_MODEL || (env.SOLVER_PROVIDER === 'ollama' ? env.SOLVER_MODEL : '') || 'qwen3:8b';
-  if (!/^[A-Za-z0-9][A-Za-z0-9._/-]*(?::[A-Za-z0-9._-]+)?$/.test(model) || model.length > 180) {
-    throw new Error('اسم النموذج المحلي غير صالح. استخدم مثلًا qwen3:8b.');
+  const visionModel = env.SOLVER_LOCAL_VISION_MODEL || (env.SOLVER_PROVIDER === 'ollama' ? env.SOLVER_VISION_MODEL : '') || 'qwen3-vl:8b';
+  if ([model, visionModel].some(name => !/^[A-Za-z0-9][A-Za-z0-9._/-]*(?::[A-Za-z0-9._-]+)?$/.test(name) || name.length > 180)) {
+    throw new Error('اسم النموذج المحلي غير صالح. استخدم مثلًا qwen3:8b للنص وqwen3-vl:8b للصور.');
   }
   let base;
   try {
@@ -43,7 +44,7 @@ function localSettings(env) {
   if (!Number.isInteger(requestTimeoutMs) || requestTimeoutMs < 1000 || requestTimeoutMs > 600000) {
     throw new Error('SOLVER_TIMEOUT_MS يجب أن يكون عددًا صحيحًا بين 1000 و600000.');
   }
-  return { model, baseUrl: base.origin, port, requestTimeoutMs };
+  return { model, visionModel, baseUrl: base.origin, port, requestTimeoutMs };
 }
 
 async function installedModels(fetchImpl, baseUrl) {
@@ -117,18 +118,21 @@ export async function startWindowsAssistant(options = {}) {
       }
       if (!models) throw new Error('لم تستجب خدمة Ollama المحلية. افتح Ollama ثم أعد المحاولة.');
     }
-    if (!hasModel(models, config.model)) {
-      log(`النموذج ${config.model} غير مثبت. يبدأ تنزيله الآن؛ قد يحتاج عدة غيغابايت من الإنترنت والمساحة (نحو 5 غيغابايت للنموذج الافتراضي).`);
+    for (const requiredModel of [...new Set([config.model, config.visionModel])]) {
+      if (hasModel(models, requiredModel)) continue;
+      log(requiredModel === config.visionModel
+        ? `النموذج المرئي ${requiredModel} غير مثبت. يبدأ تنزيله الآن لقراءة الرسوم والصور في الأسئلة العربية والإنجليزية؛ يحتاج عدة غيغابايت إضافية من الإنترنت والمساحة، مرة واحدة فقط.`
+        : `النموذج النصي ${requiredModel} غير مثبت. يبدأ تنزيله الآن؛ قد يحتاج عدة غيغابايت من الإنترنت والمساحة (نحو 5 غيغابايت للنموذج الافتراضي).`);
       try {
-        await runCommand(spawnImpl, executable, ['pull', config.model], { visible: true, env: runtimeEnv });
+        await runCommand(spawnImpl, executable, ['pull', requiredModel], { visible: true, env: runtimeEnv });
       } catch {
-        throw new Error('لم يكتمل تنزيل النموذج. تحقق من اتصال الإنترنت والمساحة ثم أعد فتح البرنامج لاستكمال التنزيل.');
+        throw new Error(`لم يكتمل تنزيل النموذج ${requiredModel}. تحقق من اتصال الإنترنت والمساحة ثم أعد فتح البرنامج لاستكمال التنزيل.`);
       }
       models = await installedModels(fetchImpl, config.baseUrl);
-      if (!models || !hasModel(models, config.model)) throw new Error('انتهى أمر التنزيل لكن النموذج لم يظهر في Ollama؛ لم يبدأ خادم الحل.');
+      if (!models || !hasModel(models, requiredModel)) throw new Error(`انتهى أمر التنزيل لكن النموذج لم يظهر في Ollama (${requiredModel})؛ لم يبدأ خادم الحل.`);
     }
     const { token } = await tokenLoader(env.SOLVER_CONFIG_DIR);
-    server = serverFactory({ provider: 'ollama', model: config.model, baseUrl: config.baseUrl,
+    server = serverFactory({ provider: 'ollama', model: config.model, visionModel: config.visionModel, baseUrl: config.baseUrl,
       apiKey: '', pairingToken: token, requestTimeoutMs: config.requestTimeoutMs });
     await new Promise((listen, reject) => {
       const onError = error => reject(error.code === 'EADDRINUSE'
@@ -150,14 +154,17 @@ export async function startWindowsAssistant(options = {}) {
     if (!health?.ok || health.provider !== 'ollama' || health.model !== config.model || health.modelReady !== true || health.configured !== true) {
       throw new Error('بدأ الخادم لكن اختبار جاهزية النموذج لم ينجح. تحقق من خدمة Ollama ثم أعد التشغيل.');
     }
-    log(`الخادم جاهز بالنموذج المحلي ${config.model}. لا يحتاج مفتاح API مدفوعًا. اترك هذه النافذة مفتوحة.`);
+    if (health.visionModel !== config.visionModel || health.visionReady !== true) {
+      throw new Error(`بدأ الخادم لكن اختبار جاهزية النموذج المرئي ${config.visionModel} لم ينجح. تحقق من تحديث Ollama ومن أن النموذج يدعم قراءة الصور، ثم أعد التشغيل.`);
+    }
+    log(`الخادم جاهز للنص والرسوم بالنموذجين المحليين ${config.model} و${config.visionModel}. لا يحتاج مفتاح API مدفوعًا. اترك هذه النافذة مفتوحة.`);
     try {
       await runCommand(spawnImpl, 'clip.exe', [], { input: token });
       log('نُسخ رمز الاقتران المحلي إلى الحافظة. الصقه في إعدادات الإضافة فقط.');
     } catch { log('تعذّر نسخ رمز الاقتران. استخدم npm run token محليًا ثم انسخه إلى الإضافة.'); }
     try { await runCommand(spawnImpl, 'explorer.exe', [`${address}/`]); }
     catch { log(`افتح صفحة الإعداد المحلية في متصفحك: ${address}/`); }
-    return { server, model: config.model, address, close };
+    return { server, model: config.model, visionModel: config.visionModel, address, close };
   } catch (error) {
     await close();
     throw error;

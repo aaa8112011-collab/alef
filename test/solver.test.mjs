@@ -146,6 +146,7 @@ test('input validates subject, supported type, option IDs, and boolean verificat
 
 const localConfig = fetchImpl => ({ provider: 'ollama', apiKey: '', model: 'qwen3:8b', baseUrl: 'http://127.0.0.1:11434', fetchImpl });
 const localResponse = value => new Response(JSON.stringify({ message: { role: 'assistant', content: JSON.stringify(value) }, done: true }));
+const visualPng = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9ZVhIAAAAASUVORK5CYII=';
 
 test('local Ollama uses the native non-streaming JSON protocol without an API key', async () => {
   const requests = [];
@@ -266,4 +267,106 @@ test('matching disagreement and invalid provider mapping do not become verified 
   assert.equal(result.needsReview,true);assert.equal(result.verified,false);
   await assert.rejects(solveQuestion(matchingInput,config(async()=>providerResponse({...matchingAnswer,matches:'invalid'}))),{code:'invalid_provider_response'});
   assert.throws(()=>validateSolveInput({...matchingInput,question:{...matchingInput.question,targets:[{id:'t1',text:'واحد'}]}}),{code:'invalid_request'});
+});
+
+test('missing required visual evidence blocks Arabic and English questions without any model request', async () => {
+  for (const text of ['ما معامل التمدد في الرسم؟', 'What is the scale factor shown in the diagram?']) {
+    let calls = 0;
+    const result = await solveQuestion({...input,verify:false,qualityMode:true,question:{...input.question,text,requiresVision:true}},localConfig(async()=>{calls++;assert.fail('Missing diagrams must never be guessed.');}));
+    assert.equal(calls,0);assert.equal(result.needsReview,true);assert.equal(result.reason,'missing_visual_evidence');
+    assert.equal(result.verified,false);assert.deepEqual(result.answer.optionIds,[]);
+  }
+});
+
+test('visual input rejects external URLs, malformed base64, oversized images and oversized pixel dimensions', () => {
+  const hugeDimensions = Buffer.from(visualPng,'base64');hugeDimensions.writeUInt32BE(999999,16);
+  for (const images of [['https://example.com/image.png'],['data:image/png;base64,'+visualPng],['%%%%'],['YWJjZA=='],Array(4).fill(visualPng),['A'.repeat(1_400_000)],[hugeDimensions.toString('base64')]]) {
+    assert.throws(()=>validateSolveInput({...input,question:{...input.question,images}}),{code:'invalid_request'});
+  }
+  assert.throws(()=>validateSolveInput({...input,qualityMode:'yes'}),{code:'invalid_request'});
+  assert.throws(()=>validateSolveInput({...input,question:{...input.question,requiresVision:'yes'}}),{code:'invalid_request'});
+});
+
+test('Arabic and English diagrams route to a verified vision-capable model with independent image evidence', async () => {
+  for (const text of ['الشكل صورة تمدد مركزه الأصل. ما معامل التمدد؟','The image is a dilation centered at the origin. What is the scale factor?']) {
+    const requests=[];
+    const result=await solveQuestion({...input,verify:false,qualityMode:true,question:{...input.question,text,requiresVision:true,images:[visualPng]}},
+      {...localConfig(async(url,request)=>{
+        const body=JSON.parse(request.body);requests.push({url,body,headers:request.headers});
+        if(url.endsWith('/api/show'))return Response.json({capabilities:['completion','vision']});
+        return localResponse(answer);
+      }),visionModel:'qwen3-vl:8b'});
+    assert.equal(result.verified,true);assert.equal(result.needsReview,false);
+    assert.equal(requests.length,3);
+    assert.deepEqual(requests[0].body,{model:'qwen3-vl:8b'});
+    const chats=requests.slice(1);
+    for(const {body,headers} of chats){
+      assert.equal(body.model,'qwen3-vl:8b');assert.equal(body.think,false);assert.ok(body.options.num_predict>=2048);
+      assert.deepEqual(body.messages[1].images,[visualPng]);assert.equal(headers.Authorization,undefined);
+      assert.equal(JSON.parse(body.messages[1].content).question.text,text);
+      assert.equal(body.messages[1].content.includes(visualPng),false,'Image bytes must not be represented as pretend readable text.');
+    }
+    assert.equal(chats[1].body.messages.length,2,'Verification must inspect original images without the first answer.');
+  }
+});
+
+test('an installed text-only model cannot receive image questions as a silent fallback', async () => {
+  const calls=[];
+  await assert.rejects(solveQuestion({...input,question:{...input.question,requiresVision:true,images:[visualPng]}},localConfig(async(url)=>{
+    calls.push(url);return Response.json({capabilities:['completion']});
+  })),{code:'vision_not_supported',status:503});
+  assert.equal(calls.length,1);assert.match(calls[0],/\/api\/show$/);
+});
+
+test('a missing vision model has a dedicated actionable error without paid-key guidance', async () => {
+  await assert.rejects(solveQuestion({...input,question:{...input.question,images:[visualPng]}},localConfig(async()=>new Response('{}',{status:404}))),error=>{
+    assert.equal(error.code,'vision_model_not_found');assert.match(error.message,/ollama pull qwen3-vl:8b/);assert.doesNotMatch(error.message,/API_KEY/);return true;
+  });
+});
+
+test('quality mode enables supported text reasoning and forces an independent check despite a saved fast setting', async () => {
+  const requests=[];
+  const result=await solveQuestion({subject:'English',verify:false,qualityMode:true,question:{id:'reasoning',text:'Choose the synonym of rapid.',type:'single',options:[{id:'a',text:'fast'},{id:'b',text:'slow'}]}},
+    localConfig(async(_url,request)=>{requests.push(JSON.parse(request.body));return localResponse(answer);}));
+  assert.equal(requests.length,2);assert.equal(result.verified,true);
+  assert.ok(requests.every(request=>request.think===true&&request.options.num_predict>=4096));
+  assert.match(requests[0].messages[0].content,/Arabic or English/);
+});
+
+test('OpenAI visual routing uses actual image content parts rather than base64 inside the prompt', async () => {
+  let requestBody;
+  const result=await solveQuestion({...input,verify:false,question:{...input.question,images:[visualPng]}},config(async(_url,request)=>{
+    requestBody=JSON.parse(request.body);return providerResponse(answer);
+  }));
+  assert.equal(result.needsReview,false);
+  const content=requestBody.messages[1].content;
+  assert.equal(content[0].type,'text');assert.equal(JSON.parse(content[0].text).question.images,undefined);
+  assert.deepEqual(content[1],{type:'image_url',image_url:{url:'data:image/png;base64,'+visualPng,detail:'high'}});
+});
+
+test('a token-truncated result is never accepted even if its partial JSON happens to parse', async () => {
+  await assert.rejects(solveQuestion({...input,verify:false},localConfig(async()=>Response.json({message:{content:JSON.stringify(answer)},done_reason:'length'}))),{code:'incomplete_provider_response'});
+});
+
+test('quality mode uses exact bilingual arithmetic without a model and labels its verification method', async () => {
+  for (const text of ['ما ناتج ٢ + ٢؟','What is 2 + 2?']) {
+    const result=await solveQuestion({...input,qualityMode:true,verify:false,question:{...input.question,text}},localConfig(async()=>assert.fail('Exact supported arithmetic must not depend on model guesses.')));
+    assert.equal(result.verified,true);assert.equal(result.needsReview,false);assert.equal(result.verificationMethod,'exact_math');
+    assert.deepEqual(result.answer.optionIds,['a']);assert.equal(result.answer.confidence,1);
+  }
+});
+
+test('narrow Arabic and English diagram references reject absent pixels even when an old extractor omitted requiresVision', async () => {
+  for(const text of ["Figure D'E'F'G' is a dilation of figure DEFG centered at the origin. What is the scale factor?",'ما معامل التمدد في الرسم المقابل؟','Find the distance shown in the graph.']) {
+    const result=await solveQuestion({...input,verify:false,question:{...input.question,text}},localConfig(async()=>assert.fail('Do not infer unseen diagram coordinates.')));
+    assert.equal(result.needsReview,true);assert.equal(result.reason,'missing_visual_evidence');
+  }
+});
+
+test('text-only dilation problems with complete corresponding coordinates are not blocked by the diagram backstop', async () => {
+  for(const text of ["Figure A' is a dilation of A; A=(2,4) and A'=(3,6). Find its scale factor.",'في الرسم تمدد يحول النقطة (٢،٤) إلى النقطة (٣،٦). ما معامل التمدد؟']) {
+    let calls=0;
+    const result=await solveQuestion({...input,verify:false,question:{...input.question,text}},localConfig(async()=>{calls++;return localResponse(answer);}));
+    assert.equal(calls,1);assert.equal(result.needsReview,false);
+  }
 });

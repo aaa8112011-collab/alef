@@ -1,3 +1,5 @@
+import {solveExactMath} from './exact-math.mjs';
+
 export class SolverError extends Error {
   constructor(code, message, status = 502) {
     super(message);
@@ -9,9 +11,80 @@ export class SolverError extends Error {
 
 const MIN_CONFIDENCE = 0.85;
 const MAX_TEXT = 18_000;
+const MAX_IMAGE_BYTES = 1_048_576;
+const MAX_IMAGES = 3;
 const plainObject = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const boundedString = (value, max) => typeof value === 'string' && value.trim().length > 0 && value.length <= max;
 const canonicalLabel = text => text.normalize('NFKC').replace(/\s+/g, ' ').trim();
+
+function imageMime(data) {
+  const bytes = Buffer.from(data, 'base64');
+  if (bytes.length >= 33 && bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])) && bytes.toString('ascii', 12, 16) === 'IHDR') {
+    const width = bytes.readUInt32BE(16), height = bytes.readUInt32BE(20);
+    if (!width || !height || width > 4096 || height > 4096) return null;
+    return 'image/png';
+  }
+  if (bytes.length >= 16 && bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255) {
+    for (let offset=2; offset+4 < bytes.length;) {
+      if (bytes[offset++] !== 255) return null;
+      while (offset < bytes.length && bytes[offset] === 255) offset++;
+      const marker = bytes[offset++];
+      if (marker === 218 || marker === 217) return null;
+      if (marker === 1 || marker >= 208 && marker <= 215) continue;
+      if (offset+2 > bytes.length) return null;
+      const size = bytes.readUInt16BE(offset);
+      if (size < 2 || offset+size > bytes.length) return null;
+      if ([192,193,194,195,197,198,199,201,202,203,205,206,207].includes(marker)) {
+        if (size < 8) return null;
+        const height = bytes.readUInt16BE(offset+3), width = bytes.readUInt16BE(offset+5);
+        return width && height && width <= 4096 && height <= 4096 ? 'image/jpeg' : null;
+      }
+      offset += size;
+    }
+  }
+  return null;
+}
+
+function validatedVisuals(question) {
+  if (question.requiresVision !== undefined && typeof question.requiresVision !== 'boolean') {
+    throw new SolverError('invalid_request', 'وصف حاجة السؤال إلى الرسم غير صالح.', 400);
+  }
+  if (question.images === undefined) return question.requiresVision === true ? {requiresVision:true, images:[]} : {};
+  if (!Array.isArray(question.images) || question.images.length > MAX_IMAGES) {
+    throw new SolverError('invalid_request', 'يُسمح بثلاث صور للسؤال كحد أقصى.', 400);
+  }
+  let total = 0;
+  for (const image of question.images) {
+    if (typeof image !== 'string' || !image.length || image.length > Math.ceil(MAX_IMAGE_BYTES / 3) * 4 ||
+      image.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(image)) {
+      throw new SolverError('invalid_request', 'بيانات صورة السؤال غير صالحة؛ يُقبل PNG أو JPEG بحد 1MB للصورة.', 400);
+    }
+    const decoded = Buffer.from(image, 'base64');
+    total += decoded.length;
+    if (decoded.length > MAX_IMAGE_BYTES || total > MAX_IMAGES * MAX_IMAGE_BYTES || decoded.toString('base64') !== image || !imageMime(image)) {
+      throw new SolverError('invalid_request', 'صورة السؤال ليست PNG أو JPEG صالحة ضمن الحجم المسموح.', 400);
+    }
+  }
+  return {requiresVision:question.requiresVision === true || question.images.length > 0, images:[...question.images]};
+}
+
+function missingDiagramFromText(question) {
+  if (question.images?.length) return false;
+  const text = question.text.normalize('NFKC').toLowerCase()
+    .replace(/[\u064b-\u065f\u0670\u0640]/g,'').replace(/[أإآ]/g,'ا')
+    .replace(/[٠-٩]/g,char=>String(char.charCodeAt(0)-0x660))
+    .replace(/[۰-۹]/g,char=>String(char.charCodeAt(0)-0x6f0)).replace(/[′’]/g,"'");
+  // A complete text-only coordinate transformation is solvable without a graph.
+  // Never override an explicit requiresVision flag; this only catches omitted
+  // evidence from older/malformed extractors that did not send that flag.
+  const coordinates=text.match(/\(\s*[+-]?\d+(?:\.\d+)?\s*[,،]\s*[+-]?\d+(?:\.\d+)?\s*\)/g)||[];
+  if (coordinates.length>=2 && /\bdilat(?:ion|e|ed)\b|تمدد|معامل/.test(text)) return false;
+  return /\b(?:shown|illustrated|pictured|displayed)\s+(?:(?:in|on)\s+(?:the\s+)?)?(?:figure|diagram|graph|chart|picture)\b/.test(text)
+    || /\b(?:figure|diagram|graph|chart|picture)\s+(?:below|above|shown|provided)\b/.test(text)
+    || /\b(?:use|refer to|look at|based on)\s+(?:the\s+)?(?:figure|diagram|graph|chart|picture)\b/.test(text)
+    || /\bfigure\s+[a-z'\s]{1,32}\s+is\s+a\s+dilation\b/.test(text)
+    || /في\s+الرسم|الرسم\s+البياني|(?:الشكل|الرسم)\s+(?:المقابل|التالي|الموضح|ادناه)|الصورة\s+(?:المقابلة|التالية|الموضحة)/.test(text);
+}
 
 function validateMatchingCollection(collection) {
   if (!Array.isArray(collection) || collection.length < 1 || collection.length > 20) {
@@ -54,6 +127,9 @@ export function validateSolveInput(input) {
   if (input.verify !== undefined && typeof input.verify !== 'boolean') {
     throw new SolverError('invalid_request', 'خيار التحقق غير صالح.', 400);
   }
+  if (input.qualityMode !== undefined && typeof input.qualityMode !== 'boolean') {
+    throw new SolverError('invalid_request', 'إعداد دقة الحل غير صالح.', 400);
+  }
   let matching = {};
   if (q.type === 'matching') {
     const items = validateMatchingCollection(q.items);
@@ -71,8 +147,10 @@ export function validateSolveInput(input) {
       type: q.type,
       options: q.options.map(({ id, text }) => ({ id, text: text.trim() })),
       ...matching,
+      ...validatedVisuals(q),
     },
-    verify: input.verify !== false,
+    verify: input.qualityMode === true || input.verify !== false,
+    qualityMode: input.qualityMode === true,
   };
 }
 
@@ -125,6 +203,37 @@ For single-choice select exactly one original option ID. For multiple-choice sel
 For matching questions, return optionIds: [] and a complete one-to-one matches array: use every original items[].id exactly once as itemId, and an original targets[].id as targetId. Never reuse a target. Unused distractor targets are allowed. List only these original IDs, never labels or invented IDs. Base the mapping only on supplied visible text; do not guess missing or ambiguous targets.
 Do not invent missing images, equations, context, option IDs, item IDs, or target IDs. If the question is incomplete or uncertain, set confidence below 0.85. Confidence is your estimate and is not a guarantee.`;
 
+const accuracyInstruction = `\nAccuracy is more important than speed. Read the entire Arabic or English problem and every option before solving. Preserve Arabic diacritics and distinguish Arabic-Indic/Persian digits from option IDs. Work through the calculation and check it independently before choosing. For a dilation, use image-coordinate/original-coordinate (not its reciprocal), check a second corresponding point, and distinguish primed from unprimed labels. For polynomial or fractional expressions preserve parentheses, signs and exponents. When images are attached, inspect all referenced figures and option images; do not infer unreadable coordinates or a missing diagram. If essential details cannot be read, use confidence below 0.85 and explain the missing evidence in Arabic. Return only the final requested JSON, never reasoning tokens or extra prose.`;
+
+const visionCapabilities = new WeakMap();
+export async function checkVisionModel(config, signal) {
+  const model = config.visionModel || 'qwen3-vl:8b';
+  const cached = visionCapabilities.get(config);
+  if (cached?.model === model && Date.now() - cached.at < 300_000) return true;
+  let response;
+  try {
+    response = await config.fetchImpl(`${config.baseUrl.replace(/\/+$/, '')}/api/show`, {
+      method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({model}), signal, redirect:'error',
+    });
+  } catch {
+    if (signal.aborted) throw new SolverError('request_aborted', 'أُلغي الطلب أو انتهت مهلة الاتصال.', 504);
+    throw new SolverError('ollama_unreachable', 'تعذّر فحص النموذج البصري. تأكد من تشغيل Ollama.', 503);
+  }
+  if (!response.ok) {
+    response.body?.cancel().catch(() => {});
+    throw new SolverError(response.status === 404 ? 'vision_model_not_found' : 'vision_model_unavailable',
+      response.status === 404 ? `النموذج البصري غير مثبت. شغّل ollama pull ${model} ثم أعد المحاولة.` : 'تعذّر فحص النموذج البصري في Ollama.', 503);
+  }
+  // Model metadata/templates can be larger than an answer; retain a bound
+  // without rejecting a valid local vision model's /api/show description.
+  const details = await readProviderJson(response, signal, 1_000_000);
+  if (!Array.isArray(details.capabilities) || !details.capabilities.includes('vision')) {
+    throw new SolverError('vision_not_supported', 'النموذج المحدد للصور لا يعلن دعم الرؤية. اختر نموذجًا بصريًا وحدّث Ollama؛ لم تُرسل الصورة إلى نموذج نصي.', 503);
+  }
+  visionCapabilities.set(config, {model,at:Date.now()});
+  return true;
+}
+
 export async function readProviderJson(response, signal, maxBytes = 100_000) {
   const chunks = [];
   let size = 0;
@@ -172,9 +281,16 @@ function localOutputBudget(question) {
 
 async function requestAnswer(input, config, signal, secondPass) {
   const isLocal = (config.provider ?? 'ollama') === 'ollama';
+  const images = input.question.images || [];
+  const hasImages = images.length > 0;
+  const {images:_images, ...question} = input.question;
+  const text = JSON.stringify({subject:input.subject,question});
+  const model = isLocal && hasImages ? config.visionModel || 'qwen3-vl:8b' : config.model;
+  const thinking = input.qualityMode && !hasImages && /(?:^|\/)qwen3(?::|$)/i.test(model);
   const messages = [
-    { role: 'system', content: instruction + (secondPass ? '\nSolve independently and double-check your reasoning before giving the JSON answer.' : '') },
-    { role: 'user', content: JSON.stringify({ subject: input.subject, question: input.question }) },
+    { role: 'system', content: instruction + (input.qualityMode || hasImages ? accuracyInstruction : '') + (secondPass ? '\nSolve independently from the original evidence. Recompute without assuming the first solution; read every relevant image and double-check your reasoning before giving the JSON answer.' : '') },
+    { role:'user', content:!isLocal && hasImages ? [{type:'text',text}, ...images.map(data=>({type:'image_url',image_url:{url:`data:${imageMime(data)};base64,${data}`,detail:'high'}}))] : text,
+      ...(isLocal && hasImages ? {images} : {}) },
   ];
   let response;
   try {
@@ -182,18 +298,18 @@ async function requestAnswer(input, config, signal, secondPass) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...(!isLocal ? { Authorization: `Bearer ${config.apiKey}` } : {}) },
       body: JSON.stringify(isLocal ? {
-        model: config.model,
+        model,
         messages,
         stream: false,
         format: 'json',
-        think: false,
+        think: thinking,
         keep_alive: '15m',
-        options: { temperature: 0, num_predict: localOutputBudget(input.question), num_ctx: 8192 },
+        options: { temperature: 0, num_predict: Math.max(localOutputBudget(input.question), thinking ? 4096 : input.qualityMode || hasImages ? 2048 : 0), num_ctx: 8192 },
       } : {
         model: config.model,
         messages,
         response_format: { type: 'json_object' },
-        max_tokens: 2000,
+        max_tokens: input.qualityMode || hasImages ? 4096 : 2000,
       }),
       signal,
       redirect: 'error',
@@ -221,6 +337,9 @@ async function requestAnswer(input, config, signal, secondPass) {
   try {
     const body = await readProviderJson(response, signal);
     if (isLocal && body?.error) throw ollamaError(body, response.status);
+    if ((isLocal && body?.done_reason === 'length') || (!isLocal && body?.choices?.[0]?.finish_reason === 'length')) {
+      throw new SolverError('incomplete_provider_response', 'انتهى حد خرج النموذج قبل اكتمال الإجابة؛ لم تُرسل إجابة مبتورة.');
+    }
     const content = isLocal ? body?.message?.content : body?.choices?.[0]?.message?.content;
     if (typeof content !== 'string') throw new Error('missing content');
     return normalizeAnswer(JSON.parse(content), input.question);
@@ -243,9 +362,19 @@ function answersAgree(first, second, question) {
 
 export async function solveQuestion(rawInput, config, parentSignal) {
   const input = validateSolveInput(rawInput);
+  if (parentSignal?.aborted) throw new SolverError('request_aborted', 'أُلغي الطلب أو انتهت مهلة الاتصال.', 504);
+  if ((input.question.requiresVision || missingDiagramFromText(input.question)) && !input.question.images?.length) {
+    return {answer:{optionIds:[],text:'',explanation:'لم تصل صورة الرسم المطلوبة للحل؛ لن تُخمن الإجابة.',confidence:0,
+      ...(input.question.type === 'matching' ? {matches:[]} : {})},verified:false,needsReview:true,reason:'missing_visual_evidence'};
+  }
+  if (input.qualityMode) {
+    const exact = solveExactMath(input.question);
+    if (exact) return {answer:exact,verified:true,needsReview:false,verificationMethod:'exact_math'};
+  }
   if (config.provider === 'openai' && !config.apiKey) throw new SolverError('not_configured', 'أضف SOLVER_API_KEY للوضع المدفوع، أو اختر SOLVER_PROVIDER=ollama للحل المحلي المجاني.', 503);
   const timeout = AbortSignal.timeout(config.requestTimeoutMs ?? (config.provider === 'openai' ? 60_000 : 240_000));
   const signal = parentSignal ? AbortSignal.any([timeout, parentSignal]) : timeout;
+  if ((config.provider ?? 'ollama') === 'ollama' && input.question.images?.length) await checkVisionModel(config, signal);
   const first = await requestAnswer(input, config, signal, false);
   if (!first) {
     return { answer: { optionIds: [], text: '', explanation: '', confidence: 0, ...(input.question.type === 'matching' ? { matches: [] } : {}) }, verified: false, needsReview: true, reason: 'invalid_selection' };

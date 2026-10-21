@@ -4,7 +4,7 @@ import { readFile, mkdir, writeFile, link, unlink } from 'node:fs/promises';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
-import { solveQuestion, SolverError, readProviderJson } from './solver.mjs';
+import { solveQuestion, SolverError, readProviderJson, checkVisionModel } from './solver.mjs';
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const localHost = /^(?:localhost|127\.0\.0\.1)(?::\d{1,5})?$/;
@@ -30,7 +30,7 @@ function readJson(request) {
     const chunks = [];
     request.on('data', chunk => {
       size += chunk.length;
-      if (size > 100_000) {
+      if (size > 4_300_000) {
         if (!rejected) reject(new SolverError('request_too_large', 'حجم السؤال أكبر من المسموح.', 413));
         rejected = true;
       } else if (!rejected) chunks.push(chunk);
@@ -52,6 +52,7 @@ function getConfig(options) {
     provider,
     apiKey: options.apiKey ?? process.env.SOLVER_API_KEY ?? '',
     model: options.model ?? process.env.SOLVER_MODEL ?? (isLocal ? 'qwen3:8b' : 'gpt-4.1-mini'),
+    visionModel: options.visionModel ?? process.env.SOLVER_VISION_MODEL ?? 'qwen3-vl:8b',
     baseUrl: options.baseUrl ?? process.env.SOLVER_BASE_URL ?? (isLocal ? 'http://127.0.0.1:11434' : 'https://api.openai.com/v1'),
     pairingToken: options.pairingToken ?? process.env.SOLVER_PAIRING_TOKEN ?? '',
     fetchImpl: options.fetchImpl ?? fetch,
@@ -60,6 +61,7 @@ function getConfig(options) {
     downloadPath: options.downloadPath ?? resolve(projectRoot, 'dist/alef-assistant.zip'),
   };
   if (typeof config.model !== 'string' || !config.model.trim() || config.model.length > 200 || /[\r\n]/.test(config.model)) throw new Error('SOLVER_MODEL must be a nonempty model name.');
+  if (typeof config.visionModel !== 'string' || !config.visionModel.trim() || config.visionModel.length > 200 || /[\r\n]/.test(config.visionModel)) throw new Error('SOLVER_VISION_MODEL must be a nonempty model name.');
   if (!Number.isInteger(config.requestTimeoutMs) || config.requestTimeoutMs < 1000 || config.requestTimeoutMs > 600_000) throw new Error('SOLVER_TIMEOUT_MS must be between 1000 and 600000.');
   let endpoint;
   try { endpoint = new URL(config.baseUrl); } catch { throw new Error('SOLVER_BASE_URL must be a valid URL.'); }
@@ -75,7 +77,8 @@ function getConfig(options) {
 
 const canonicalModel = name => name.split('/').at(-1).includes(':') ? name : `${name}:latest`;
 async function getHealth(config) {
-  const base = { ok: true, configured: false, provider: config.provider, model: config.model, modelReady: false };
+  const base = { ok: true, protocolVersion:2, configured: false, provider: config.provider, model: config.model, modelReady: false,
+    ...(config.provider === 'ollama' ? {visionModel:config.visionModel,visionInstalled:false,visionReady:false} : {}) };
   if (config.provider === 'openai') return { ...base, configured: Boolean(config.apiKey), ...(!config.apiKey ? { issue: 'not_configured', message: 'الوضع المدفوع يحتاج مفتاح خدمة؛ يمكنك استخدام وضع Ollama المحلي المجاني بدلًا منه.' } : {}) };
   const signal = AbortSignal.timeout(config.healthTimeoutMs);
   let response;
@@ -88,9 +91,17 @@ async function getHealth(config) {
     if (!response.ok) { response.body?.cancel().catch(() => {}); throw new Error('runtime response'); }
     const body = await readProviderJson(response, signal);
     if (!Array.isArray(body.models)) throw new Error('invalid model list');
-    const modelReady = body.models.some(model => [model?.name, model?.model].some(name => typeof name === 'string' && canonicalModel(name) === canonicalModel(config.model)));
-    return modelReady ? { ...base, configured: true, modelReady: true }
-      : { ...base, issue: 'model_not_found', message: `النموذج غير مثبت. شغّل ollama pull ${config.model} ثم أعد الفحص.` };
+    const installed = name => body.models.some(model => [model?.name, model?.model].some(value => typeof value === 'string' && canonicalModel(value) === canonicalModel(name)));
+    const modelReady = installed(config.model), visionInstalled = installed(config.visionModel);
+    const health = {...base,configured:modelReady,modelReady,visionInstalled,
+      ...(!modelReady ? {issue:'model_not_found',message:`النموذج غير مثبت. شغّل ollama pull ${config.model} ثم أعد الفحص.`} : {})};
+    if (!visionInstalled) return {...health,visionIssue:'vision_model_not_found',visionMessage:`النموذج البصري غير مثبت. شغّل ollama pull ${config.visionModel} لقراءة الصور والرسوم.`};
+    try {
+      await checkVisionModel(config, signal);
+      return {...health,visionReady:true};
+    } catch (error) {
+      return {...health,visionIssue:error.code || 'vision_model_unavailable',visionMessage:error instanceof SolverError ? error.message : 'تعذّر التأكد من دعم النموذج للصور.'};
+    }
   } catch {
     return { ...base, issue: 'invalid_provider_response', message: 'تعذّر قراءة قائمة نماذج Ollama. تحقّق من تشغيله وتحديثه.' };
   }
@@ -101,7 +112,7 @@ const setupPage = `<!doctype html>
 <title>مُعين ألف — الإعداد المحلي</title>
 <style>body{font-family:system-ui,sans-serif;background:#f5f8fc;color:#17243a;max-width:760px;padding:48px 24px;margin:auto;line-height:1.9}main{background:white;padding:32px;border:1px solid #dce4ee;border-radius:20px}a{color:#136dca}code{direction:ltr;display:inline-block;background:#edf3fa;padding:0 6px;border-radius:4px}h1{margin:0}</style>
 <main><h1>مُعين ألف</h1><p>الخادم المحلي يعمل. الحل الافتراضي مجاني على جهازك عبر Ollama، دون مفتاح API أو اشتراك مدفوع. هذه أداة مستقلة وليست منتجًا رسميًا من منصة ألف.</p>
-<ol><li>ثبّت Ollama لنظام Windows من موقعه الرسمي وافتحه.</li><li>افتح PowerShell وشغّل <code>ollama pull qwen3:8b</code> مرة واحدة لتنزيل النموذج. تنزيل النموذج يحتاج اتصالًا بالإنترنت ومساحة تخزين؛ سرعة الحل تعتمد على جهازك. النموذج مناسب لجهازك ذي ذاكرة 32GB؛ يمكنك اختيار <code>qwen3:4b</code> الأخف إذا احتجت.</li><li>حمّل <a href="/downloads/alef-assistant.zip">ملف الإضافة</a> وفك ضغطه، أو استخدم مجلد <code>extension</code> مباشرة.</li><li>افتح صفحة إضافات Chrome، فعّل وضع المطور، ثم اختر «تحميل إضافة غير مضغوطة».</li><li>سجّل الدخول إلى <code>https://moe.alefed.com/</code> في متصفحك، ثم افتح الإضافة واربط علامة التبويب.</li><li>شغّل <code>npm run token</code> محليًا وانسخ رمز الاقتران إلى إعدادات الإضافة. هذا الرمز يحمي الاتصال بين الإضافة والخادم المحلي؛ ليس مفتاح API مدفوعًا. الملف موجود في <code>.alef-assistant/pairing-token</code> داخل مجلد المستخدم، أو المسار الذي حددته في <code>SOLVER_CONFIG_DIR</code>.</li><li>افحص الاتصال في الإضافة. ظهور النموذج في فحص الحالة يؤكد تثبيته، أما أول سؤال فيختبر الاستدلال الفعلي.</li></ol>
+<ol><li>ثبّت Ollama لنظام Windows من موقعه الرسمي وافتحه.</li><li>على ويندوز شغّل <code>START-WINDOWS.cmd</code> ليجهّز نموذج النص <code>qwen3:8b</code> ونموذج الصور <code>qwen3-vl:8b</code>. للتشغيل اليدوي استخدم <code>ollama pull qwen3:8b</code> ثم <code>ollama pull qwen3-vl:8b</code> مرة واحدة. تنزيل النموذجين يحتاج اتصالًا بالإنترنت ومساحة تخزين؛ تُفحص قدرة النموذج البصري فعليًا قبل استخدام الرسوم، وسرعة الحل تعتمد على الجهاز.</li><li>حمّل <a href="/downloads/alef-assistant.zip">ملف الإضافة</a> وفك ضغطه، أو استخدم مجلد <code>extension</code> مباشرة.</li><li>افتح صفحة إضافات Chrome، فعّل وضع المطور، ثم اختر «تحميل إضافة غير مضغوطة».</li><li>سجّل الدخول إلى <code>https://moe.alefed.com/</code> في متصفحك، ثم افتح الإضافة واربط علامة التبويب.</li><li>شغّل <code>npm run token</code> محليًا وانسخ رمز الاقتران إلى إعدادات الإضافة. هذا الرمز يحمي الاتصال بين الإضافة والخادم المحلي؛ ليس مفتاح API مدفوعًا. الملف موجود في <code>.alef-assistant/pairing-token</code> داخل مجلد المستخدم، أو المسار الذي حددته في <code>SOLVER_CONFIG_DIR</code>.</li><li>افحص الاتصال في الإضافة. ظهور النموذج في فحص الحالة يؤكد تثبيته، أما أول سؤال فيختبر الاستدلال الفعلي.</li></ol>
 <p>في وضع Ollama المحلي تبقى الأسئلة على جهازك. تقدير الثقة والتحقق المزدوج لا يضمنان صحة كل إجابة، والموقع الحقيقي يحتاج اختبارًا وضبطًا قبل الاعتماد على الإرسال التلقائي.</p>
 <details><summary>الوضع الخارجي اختياري وقد يكون مدفوعًا</summary><p>لمن يريد استخدام مزود خارجي فقط: اضبط <code>SOLVER_PROVIDER=openai</code> ومفتاح <code>SOLVER_API_KEY</code>. عندها تُرسل الأسئلة إلى المزود الخارجي. اترك الوضع الافتراضي <code>ollama</code> للعمل المحلي دون مفتاح.</p></details>
 <p><a href="/api/health">حالة الخدمة والنموذج المحلي</a></p></main></html>`;

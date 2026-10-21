@@ -92,7 +92,7 @@ test('a foreign Host header is refused to prevent DNS rebinding', async t => {
 
 test('oversized and malformed requests fail before provider access', async t => {
   const url = await withServer(t);
-  let response = await post(url, { ...input, subject: 'x'.repeat(100_001) });
+  let response = await post(url, { ...input, subject: 'x'.repeat(4_300_001) });
   assert.equal(response.status, 413);
   response = await fetch(`${url}/api/solve`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: '{broken' });
   assert.equal(response.status, 400);
@@ -173,7 +173,15 @@ test('local Ollama HTTP integration checks the installed model and solves withou
   });
   const url = await withServer(t, { provider: 'ollama', apiKey: '', model: 'qwen3:8b', baseUrl });
   const health = await (await fetch(`${url}/api/health`)).json();
-  assert.deepEqual(health, { ok: true, configured: true, provider: 'ollama', model: 'qwen3:8b', modelReady: true });
+  assert.equal(health.ok, true);
+  assert.equal(health.protocolVersion, 2);
+  assert.equal(health.configured, true);
+  assert.equal(health.provider, 'ollama');
+  assert.equal(health.model, 'qwen3:8b');
+  assert.equal(health.modelReady, true);
+  assert.equal(health.visionModel, 'qwen3-vl:8b');
+  assert.equal(health.visionReady, false);
+  assert.equal(health.visionIssue, 'vision_model_not_found');
   const solved = await post(url, { ...input, verify: true });
   assert.equal(solved.status, 200);
   assert.deepEqual(await solved.json(), { answer, verified: true, needsReview: false });
@@ -227,4 +235,66 @@ test('local health uses a bounded timeout when the runtime stalls', async t => {
   const health = await (await fetch(`${url}/api/health`)).json();
   assert.equal(health.issue, 'ollama_unreachable');
   assert.equal(health.configured, false);
+});
+
+const diagramPng = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9ZVhIAAAAASUVORK5CYII=';
+
+test('health verifies actual vision capability and the native HTTP route receives image bytes for both languages', async t => {
+  const received=[];
+  const baseUrl=await withLocalRuntime(t,async(request,response)=>{
+    response.setHeader('Content-Type','application/json');
+    assert.equal(request.headers.authorization,undefined);
+    if(request.url==='/api/tags')return response.end(JSON.stringify({models:[{name:'qwen3:8b'},{name:'qwen3-vl:8b'}]}));
+    const chunks=[];for await(const chunk of request)chunks.push(chunk);
+    const body=JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    received.push({path:request.url,body});
+    if(request.url==='/api/show')return response.end(JSON.stringify({capabilities:['completion','vision']}));
+    assert.equal(request.url,'/api/chat');
+    response.end(JSON.stringify({message:{content:JSON.stringify(answer)},done:true}));
+  });
+  const url=await withServer(t,{provider:'ollama',model:'qwen3:8b',visionModel:'qwen3-vl:8b',baseUrl});
+  const health=await(await fetch(url+'/api/health')).json();
+  assert.equal(health.protocolVersion,2);assert.equal(health.visionInstalled,true);assert.equal(health.visionReady,true);
+  for(const text of ['اقرأ الرسم وحدد معامل التمدد.','Read the diagram and find the dilation scale factor.']){
+    const response=await post(url,{...input,qualityMode:true,question:{...input.question,text,requiresVision:true,images:[diagramPng]}});
+    assert.equal(response.status,200);
+    const result=await response.json();assert.equal(result.verified,true);assert.equal(result.needsReview,false);
+  }
+  const chats=received.filter(item=>item.path==='/api/chat');assert.equal(chats.length,4);
+  assert.ok(chats.every(({body})=>body.model==='qwen3-vl:8b'&&body.messages[1].images[0]===diagramPng));
+  assert.equal(received.filter(item=>item.path==='/api/show').length,1,'A verified configured model capability is reused between related solves.');
+});
+
+test('installed vision-model names are insufficient when the runtime reports a text-only model',async t=>{
+  const baseUrl=await withLocalRuntime(t,async(request,response)=>{
+    response.setHeader('Content-Type','application/json');
+    response.end(JSON.stringify(request.url==='/api/tags'?{models:[{name:'qwen3:8b'},{name:'qwen3-vl:8b'}]}:{capabilities:['completion']}));
+  });
+  const url=await withServer(t,{provider:'ollama',model:'qwen3:8b',baseUrl});
+  const health=await(await fetch(url+'/api/health')).json();
+  assert.equal(health.modelReady,true);assert.equal(health.configured,true);
+  assert.equal(health.visionInstalled,true);assert.equal(health.visionReady,false);
+  assert.equal(health.visionIssue,'vision_not_supported');
+  const response=await post(url,{...input,question:{...input.question,requiresVision:true,images:[diagramPng]}});
+  assert.equal(response.status,503);assert.equal((await response.json()).error.code,'vision_not_supported');
+});
+
+test('required diagrams missing from the request produce a review result without contacting a provider',async t=>{
+  let called=false;
+  const url=await withServer(t,{provider:'ollama',fetchImpl:async()=>{called=true;assert.fail('No image evidence.');}});
+  const response=await post(url,{...input,question:{...input.question,requiresVision:true}});
+  assert.equal(response.status,200);const body=await response.json();
+  assert.equal(body.needsReview,true);assert.equal(body.reason,'missing_visual_evidence');assert.equal(called,false);
+});
+
+test('the bounded HTTP body accepts real image payload sizes above the old text-only limit',async t=>{
+  const largePng=Buffer.concat([Buffer.from(diagramPng,'base64'),Buffer.alloc(110_000)]).toString('base64');
+  let receivedImage;
+  const url=await withServer(t,{provider:'ollama',fetchImpl:async(path,request)=>{
+    if(path.endsWith('/api/show'))return Response.json({capabilities:['vision']});
+    receivedImage=JSON.parse(request.body).messages[1].images[0];
+    return Response.json({message:{content:JSON.stringify(answer)},done:true});
+  }});
+  const response=await post(url,{...input,question:{...input.question,images:[largePng]}});
+  assert.equal(response.status,200);assert.equal(receivedImage,largePng);
 });

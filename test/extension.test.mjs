@@ -280,7 +280,7 @@ test('ambiguous simultaneous questions are rejected before selecting any answer'
   assert.equal(await harness.page.locator('input:checked').count(), 0);
 });
 
-test('image-dependent questions are explicitly unsupported by the text-only reader', async t => {
+test('image-dependent questions require captured visual evidence instead of silently becoming text-only', async t => {
   const harness = await openMath(t);
   await harness.page.evaluate(() => {
     const image = document.createElement('img');
@@ -291,7 +291,13 @@ test('image-dependent questions are explicitly unsupported by the text-only read
     document.querySelector('[data-alef-question]').append(image);
   });
   const result = await harness.send({ type: 'ALEF_GET_QUESTION' });
-  assert.equal(result.ok, false);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.question.requiresVision, true);
+  assert.equal(result.question.visuals.length, 1);
+  const capture = await harness.send({type:'ALEF_GET_VISUALS',questionId:result.question.id,questionFingerprint:result.question.fingerprint});
+  assert.equal(capture.ok, true, JSON.stringify(capture));
+  assert.equal(capture.images.length, 1);
+  assert.match(capture.images[0].mimeType, /^image\/(?:png|jpeg)$/);
   assert.equal((await harness.page.evaluate(() => window.fixture.submissions)).length, 0);
 });
 

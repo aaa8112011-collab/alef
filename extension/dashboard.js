@@ -8,7 +8,7 @@ let selectedSubject = null;
 let subjects = [];
 let running = false;
 let connected = false;
-let config = {serverUrl:DEFAULT_URL,token:'',verify:false,autoSubmit:true,skipInstruction:true,selectors:{}};
+let config = {serverUrl:DEFAULT_URL,token:'',verify:true,qualityMode:true,autoSubmit:true,skipInstruction:true,selectors:{}};
 let startedAt = null;
 let eventCount = 0;
 let lessonQueue = [];
@@ -34,8 +34,12 @@ function setBadge(text, kind = 'neutral') {
 }
 function updateSolveMode() {
   $('solve-mode').textContent = $('verify').checked
-    ? 'التحقّق الإضافي مفعّل: حلّان مستقلان لكل سؤال؛ يحتاج وقتًا إضافيًا.'
-    : 'الوضع السريع مفعّل: حل واحد لكل سؤال. فعّل التحقّق لإضافة حل ثانٍ مستقل يحتاج وقتًا إضافيًا.';
+    ? 'الدقة الأعلى مفعّلة: تفكير متأنٍّ وحلّان مستقلان للمراجعة؛ يحتاج وقتًا إضافيًا، ولا يضمن صحة كل إجابة.'
+    : 'الوضع السريع مفعّل: حل واحد دون المراجعة المستقلة؛ قد يزيد احتمال الخطأ.';
+}
+function readRunOptions() {
+  config.verify=$('verify').checked;config.qualityMode=config.verify;
+  config.autoSubmit=$('auto-submit').checked;config.skipInstruction=$('skip-instruction').checked;
 }
 function updateButtons() {
   $('start').disabled = !connected || !selectedSubject || running;
@@ -122,6 +126,7 @@ function clearAnswer({resetLesson=false}={}) {
   }
   $('answer-empty').hidden=false;$('answer-content').hidden=true;
   $('question-text').textContent='';$('answer-box').hidden=true;
+  $('question-media-note').hidden=true;
   $('answer-text').textContent='';$('explanation').textContent='';$('confidence').textContent='';
   $('answer-state').textContent='';$('answer-state').dataset.state='';
   $('question-label').textContent='السؤال الحالي';
@@ -142,10 +147,13 @@ function showAnswer(event) {
     if(event.kind==='question'||changed)clearAnswer();
     displayedQuestion=event.question;
     $('question-text').textContent=event.question.text;
+    $('question-media-note').hidden=event.question.requiresVision!==true;
     $('answer-empty').hidden=true;$('answer-content').hidden=false;
   }
   if(event.kind==='question') {
-    $('answer-state').textContent='جارٍ حل هذا السؤال…';$('answer-state').dataset.state='working';
+    $('answer-state').textContent=event.question?.requiresVision
+      ? 'جارٍ حل هذا السؤال مع الرسم أو الصورة…' : 'جارٍ حل هذا السؤال…';
+    $('answer-state').dataset.state='working';
   }
   if (event.answer) {
     $('answer-empty').hidden=true;$('answer-content').hidden=false;
@@ -274,7 +282,14 @@ async function checkServer() {
     const local = health.provider === 'ollama';
     const ready = health.configured === true && (!local || health.modelReady === true);
     $('server-status').textContent=ready
-      ? local ? `متصل محليًا · النموذج: ${health.model} · دون مفتاح API` : `متصل · المزوّد الخارجي · النموذج: ${health.model}`
+      ? local ? Number(health.protocolVersion)<2||!Number.isFinite(Number(health.protocolVersion))
+        ? `متصل للنصوص عبر ${health.model}؛ حدّث ملفات الخادم وشغّل START-WINDOWS.cmd من النسخة الجديدة لتجهيز قراءة الصور والدقة الأعلى.`
+        : health.visionReady===true
+        ? `متصل محليًا · النصوص: ${health.model} · الصور: ${health.visionModel} · دون مفتاح API`
+        : health.visionReady===false
+          ? `متصل للنصوص عبر ${health.model}؛ الصور غير جاهزة. ${health.visionMessage||`النموذج البصري ${health.visionModel||''} يحتاج تجهيزًا.`} شغّل START-WINDOWS.cmd من النسخة الجديدة ثم أعد الفحص.`
+          : `متصل للنصوص عبر ${health.model}؛ حدّث ملفات الخادم وشغّل START-WINDOWS.cmd من النسخة الجديدة لتجهيز قراءة الصور.`
+        : `متصل · المزوّد الخارجي · النموذج: ${health.model}`
       : typeof health.message === 'string' && health.message.trim()
         ? health.message
         : local
@@ -315,6 +330,7 @@ async function saveSettings(event) {
   try {
     config.serverUrl=checkedUrl($('server-url').value);
     config.token=$('pairing-token').value.trim();
+    readRunOptions();
     const selectors={};document.querySelectorAll('[data-selector]').forEach(input=>{selectors[input.dataset.selector]=input.value.trim();});
     config.selectors=selectors;
     const {token,...persistent}=config;
@@ -329,8 +345,7 @@ async function start() {
     await pendingPairingSave;
     if(!config.token){openSettings();throw new Error('الصق رمز الربط المحلي في الإعدادات أولًا. ينسخه تشغيل START-WINDOWS.cmd إلى الحافظة.');}
     $('start').disabled=true;
-    config.verify=$('verify').checked;config.autoSubmit=$('auto-submit').checked;
-    config.skipInstruction=$('skip-instruction').checked;
+    readRunOptions();
     const result=await message('START',{subjectId:selectedSubject,config:{...config,minConfidence:.85}});
     $('event-log').replaceChildren();eventCount=0;$('activity-count').textContent='0 أحداث';
     restoreState(result.state);running=true;startedAt=Date.now();
@@ -347,6 +362,12 @@ async function init() {
   config={...config,...local.alefConfig,token:hasSavedToken
     ? typeof local.alefPairingToken==='string'?local.alefPairingToken.trim():''
     : typeof session.alefPairingToken==='string'?session.alefPairingToken.trim():''};
+  // The accuracy release upgrades old fast-only preferences once. A later
+  // explicit qualityMode:false remains the user's choice on every reopening.
+  const upgraded=typeof local.alefConfig?.qualityMode!=='boolean';
+  config.qualityMode=upgraded?true:local.alefConfig.qualityMode;
+  config.verify=config.qualityMode;
+  if(upgraded){const {token,...persistent}=config;await chrome.storage.local.set({alefConfig:persistent});}
   if(!hasSavedToken&&Object.hasOwn(session,'alefPairingToken'))await persistPairingToken(config.token);
   await chrome.storage.session.remove?.('alefPairingToken');
   $('verify').checked=config.verify===true;$('auto-submit').checked=config.autoSubmit!==false;
@@ -358,7 +379,7 @@ async function init() {
   $('diagnostics').addEventListener('click',exportDiagnostics);
   $('open-alef').addEventListener('click',async()=>{const tab=await chrome.tabs.create({url:WEBSITE});tabId=tab.id;});
   $('start').addEventListener('click',start);
-  $('verify').addEventListener('change',updateSolveMode);
+  $('verify').addEventListener('change',()=>{readRunOptions();updateSolveMode();});
   $('stop').addEventListener('click',async()=>{try{await message('STOP');}catch(error){notice(error.message,true);}});
   document.querySelectorAll('.settings-trigger').forEach(button=>button.addEventListener('click',openSettings));
   $('close-settings').addEventListener('click',()=>$('settings-dialog').close());

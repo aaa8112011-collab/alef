@@ -13,6 +13,8 @@ const reviewMessages = {
   low_confidence:'تقدير الثقة منخفض؛ راجع الإجابة قبل إرسالها.',
   verification_disagreement:'لم تتفق عمليتا الحل والتحقق؛ راجع السؤال.',
   invalid_selection:'خيارات الإجابة لا تطابق السؤال؛ لم تُطبّق الإجابة.',
+  missing_visual_evidence:'الرسم أو الصورة المطلوبة غير مقروءة؛ لم تُرسل إجابة تخمينية.',
+  visual_evidence_unreadable:'لم تتضح بيانات الرسم للنموذج؛ توقف الحل في هذا السؤال.',
 };
 const allowedOrigin = url => {
   try {
@@ -142,7 +144,9 @@ function checkedConfig(input) {
   }
   const confidence = Number(input.minConfidence ?? 0.85);
   if (!Number.isFinite(confidence) || confidence < 0.85 || confidence > 1) throw new Error('حد الثقة يجب أن يكون بين 0.85 و1.');
-  return {serverUrl:url.origin,token:input.token.trim(),selectors,verify:input.verify !== false,
+  if (input.qualityMode !== undefined && typeof input.qualityMode !== 'boolean') throw new Error('إعداد وضع الدقة غير صالح.');
+  const qualityMode=input.qualityMode===true;
+  return {serverUrl:url.origin,token:input.token.trim(),selectors,qualityMode,verify:qualityMode||input.verify !== false,
     autoSubmit:input.autoSubmit !== false,skipInstruction:input.skipInstruction !== false,minConfidence:confidence};
 }
 async function connect(tabId,selectors) {
@@ -263,7 +267,9 @@ async function solve(question,subject,config,signal) {
   try {
     response = await fetch(`${config.serverUrl}/api/solve`,{
       method:'POST',headers:{'Content-Type':'application/json','Authorization':`Bearer ${config.token}`},
-      body:JSON.stringify({subject,question:{id:question.id,text:question.text,type:question.type,options:question.options,...(question.type==='matching'?{items:question.items,targets:question.targets}:{})},verify:config.verify}),
+      body:JSON.stringify({subject,question:{id:question.id,text:question.text,type:question.type,options:question.options,
+        ...(question.requiresVision?{requiresVision:true,images:question.images||[]}:{}),
+        ...(question.type==='matching'?{items:question.items,targets:question.targets}:{})},verify:config.verify,qualityMode:config.qualityMode}),
       signal:AbortSignal.any([signal,timeout]),
     });
   } catch (error) {
@@ -277,6 +283,40 @@ async function solve(question,subject,config,signal) {
     typeof result?.error === 'string' ? result.error : 'تعذر حل السؤال. تحقق من إعدادات الخادم.');
   if (!result || typeof result !== 'object') throw new Error('الخادم لم يُرجع إجابة قابلة للقراءة.');
   return result;
+}
+async function checkAccuracyBackend(config,signal,requiresVision) {
+  if (!config.backendHealth) {
+    let response,health;
+    try {
+      response=await fetch(`${config.serverUrl}/api/health`,{signal:AbortSignal.any([signal,AbortSignal.timeout(7000)])});
+      if(response.ok)health=await response.json();
+    } catch(error) {
+      if(signal.aborted)throw aborted();
+      throw new Error('تعذر فحص خادم الدقة. شغّل START-WINDOWS.cmd من النسخة الجديدة ثم أعد البدء.');
+    }
+    if(!health?.ok || !(health.protocolVersion>=2)) {
+      throw new Error('الخادم يعمل بنسخة قديمة لا تدعم الصور ووضع الدقة. أغلق نافذة التشغيل القديمة وشغّل START-WINDOWS.cmd من النسخة الجديدة.');
+    }
+    config.backendHealth=health;
+  }
+  if(requiresVision&&config.backendHealth.visionReady!==true) {
+    throw new Error(config.backendHealth.visionMessage||'النموذج البصري غير جاهز. شغّل START-WINDOWS.cmd من النسخة الجديدة لتجهيزه؛ لم يُرسل السؤال إلى نموذج نصّي.');
+  }
+}
+async function captureQuestionImages(tabId,question,config,origin,signal) {
+  const capture=await pageMessage(tabId,{type:'ALEF_GET_VISUALS',questionId:question.id,
+    questionFingerprint:question.fingerprint,selectors:config.selectors},origin,signal);
+  if(capture.questionId!==question.id||capture.questionFingerprint!==question.fingerprint ||
+    !Array.isArray(capture.images)||!capture.images.length||capture.images.length>3 ||
+    capture.images.some(image=>!image||typeof image.data!=='string'||!image.data.length||image.data.length>1_398_104)) {
+    throw new Error('لم تُلتقط جميع صور السؤال بوضوح. توقف الحل بدل إرسال نص ناقص.');
+  }
+  const labels=capture.images.map((image,index)=>({image:index+1,description:String(image.alt||'').slice(0,600),
+    ...(image.optionId?{optionId:image.optionId}: {})}));
+  // Pixel data only lives in this request. Never persist it in run events or
+  // the dashboard's current question, including while retrying an answer.
+  return {...question,requiresVision:true,images:capture.images.map(image=>image.data),
+    text:question.text+'\n\nAttached visual evidence (image order and optional option IDs):\n'+JSON.stringify(labels)};
 }
 function updateQueue(state,snapshot) {
   for (const lesson of snapshot.lessons || []) {
@@ -341,7 +381,7 @@ async function runLesson(tabId,subject,initial,lesson,config,origin,signal,state
       const identity=q&&`${q.id}:${q.fingerprint}`;
       const rejected=rejectedAnswers.get(identity)||[];
       const retry=snapshot.navigation?.find(action=>action.kind==='retry');
-      if(!q||!lastSubmitted||lastSubmitted.question.id!==q.id||rejected.length>=2||!retry)return {review:true,snapshot,message:'لم يُقبل الحل بعد المحاولات المتاحة. سُجّل الدرس للمراجعة بدل تكرار الإجابة.'};
+      if(!q||!lastSubmitted||!sameQuestion(snapshot,lastSubmitted.question)||rejected.length>=2||!retry)return {review:true,snapshot,message:'لم يُقبل الحل بعد المحاولات المتاحة. سُجّل الدرس للمراجعة بدل تكرار الإجابة.'};
       rejected.push(lastSubmitted.answer);rejectedAnswers.set(identity,rejected);
       await emit(tabId,'status','رفض الموقع الإجابة؛ إعادة التحقق مع استبعاد الحل المرفوض…');
       await navigate(tabId,snapshot,retry,config,origin,signal);
@@ -356,10 +396,13 @@ async function runLesson(tabId,subject,initial,lesson,config,origin,signal,state
       if (state.stats.total >= 1000) return {review:true,blocking:true,snapshot,message:'وصل التشغيل إلى حد 1000 سؤال. افحص التقدم ثم ابدأ جلسة جديدة.'};
       seenQuestions.add(identity);
       state.stats.total++;
-      await emit(tabId,'question',config.verify?'جارٍ حل السؤال ثم التحقق بحل ثانٍ…':'جارٍ حل السؤال بالوضع السريع…',{question});
+      await emit(tabId,'question',question.requiresVision?'قراءة الرسم أو الصورة ثم حل السؤال ومراجعة النتيجة…':
+        config.qualityMode?'جارٍ حل السؤال بوضع الدقة الأعلى…':config.verify?'جارٍ حل السؤال ثم التحقق بحل ثانٍ…':'جارٍ حل السؤال بالوضع السريع…',{question});
       let result;
       const rejected=rejectedAnswers.get(identity)||[];
-      const requestQuestion=rejected.length?{...question,text:question.text+'\n\nPlatform feedback: these previous answers were rejected. Re-evaluate the question carefully. Do not repeat a rejected answer; lower confidence if the question is unclear.\n'+JSON.stringify(rejected.map(answer=>({optionIds:answer.optionIds,text:answer.text,matches:answer.matches})))}:question;
+      let requestQuestion=rejected.length?{...question,text:question.text+'\n\nPlatform feedback: these previous answers were rejected. Re-evaluate the question carefully. Do not repeat a rejected answer; lower confidence if the question is unclear.\n'+JSON.stringify(rejected.map(answer=>({optionIds:answer.optionIds,text:answer.text,matches:answer.matches})))}:question;
+      if(config.qualityMode||question.requiresVision)await checkAccuracyBackend(config,signal,question.requiresVision);
+      if(question.requiresVision)requestQuestion=await captureQuestionImages(tabId,requestQuestion,config,origin,signal);
       const solveStarted=Date.now();
       try { result = await solve(requestQuestion,subject.name,config,signal); }
       catch (error) { error.fatal = true;throw error; }

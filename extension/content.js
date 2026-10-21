@@ -1,7 +1,7 @@
 (() => {
   'use strict';
-  if (globalThis.__alefAssistantInstalled==='0.4.2') return;
-  globalThis.__alefAssistantInstalled = '0.4.2';
+  if (globalThis.__alefAssistantInstalled==='0.5.0') return;
+  globalThis.__alefAssistantInstalled = '0.5.0';
 
   let selectors = {};
   let subjects = new Map();
@@ -362,7 +362,7 @@
     const fingerprint=hash(JSON.stringify([location.pathname,location.search,location.hash,text(first('[data-testid="progress-bar-slide-count"]')),stage,catalog,listedSubjects,listedLessons,question?.id,question?.fingerprint,navigation,completed,text(first('[data-alef-instruction],[data-testid="content-page-body-player"],.instruction,main')).slice(0,3000)]));
     return {ok:true,page:{title:document.title,url:location.href},stage,subjects:listedSubjects,lessons:listedLessons,
       question,needsPreparation:!!questionState.needsPreparation,feedback:questionState.feedback,completed,canNext:navigation.some(action=>action.kind==='next'),navigation,fingerprint,...(catalog?{catalog}:{}),
-      diagnostics:[...new Set(diagnostics)],capabilities:{text:true,single:true,multiple:true,images:false,dragAndDrop:true,customSelectors:true,courseNavigation:true}};
+      diagnostics:[...new Set(diagnostics)],capabilities:{text:true,single:true,multiple:true,images:true,visionCapture:true,dragAndDrop:true,customSelectors:true,courseNavigation:true}};
   }
   const scan=()=>inspect();
   function questionContainer() {
@@ -377,14 +377,15 @@
     if(marked.length){const attempts=all('div[data-testid^="attempt-"]',container).filter(node=>node.querySelector('[data-testid="choice-item"]'));const active=attempts.at(-1);return active?marked.filter(node=>active.contains(node)):marked;}
     return all('input[type="radio"],input[type="checkbox"],[role="radio"],[role="checkbox"]',container);
   }
-  function describeOption(node) {
+  function describeOption(node,index=0) {
     const actual=node.matches('[data-testid="choice-item"]');
     const control=node.matches('input,[role="radio"],[role="checkbox"]')?node:node.querySelector('input[type="radio"],input[type="checkbox"],[role="radio"],[role="checkbox"]')||node;
     const weaver=node.matches('[data-testid="mcq-option-container"]');
     const authored=weaver?first('[data-testid="mcq-item-label"],.mcq-option-content-container',node):null;
     // Weaver's accessibility label gains “Selected/Correct” after clicking.
     // Authored option content and its option UUID remain stable across renders.
-    const label=node.matches('input')?clean([...node.labels||[]].map(text).join(' ')||node.getAttribute('aria-label')||node.value):authored?text(authored):text(node);
+    let label=node.matches('input')?clean([...node.labels||[]].map(text).join(' ')||node.getAttribute('aria-label')||node.value):authored?text(authored):text(node);
+    if(!label&&(visualAll('img,canvas,svg',node).some(visual=>!visual.closest(VISUAL_EXCLUSIONS))||[node,...visualAll('*',node)].some(visual=>/url\(/.test(view(visual).getComputedStyle(visual).backgroundImage))))label=`الخيار المصوّر ${index+1}`;
     const describedId=weaver?node.getAttribute('aria-describedby')?.split(/\s+/).find(id=>/^option-.+-content$/.test(id)):null;
     const id=node.getAttribute('data-alef-option')||control.getAttribute('data-option-id')||control.id||describedId||(control.value&&control.value!=='on'?control.value:'')||`option-${hash(label)}`;
     return {id,text:label,node,control,actual};
@@ -392,6 +393,160 @@
   function selected(option) {
     if(option.actual)return !!option.node.querySelector('.choice.selected,.input-placeholder.selected,.input-placeholder.selected-by-user,.choice-select.selected')||option.node.classList.contains('selected');
     return option.control.matches('input')?option.control.checked:option.control.getAttribute('aria-checked')==='true';
+  }
+  const VISUAL_EXCLUSIONS='.mcq-icon-container,.mcq-option-icon-container,.dnd-grip-icon,.katex,math,mjx-container,.MathJax,[data-testid$="question-feedback-container"],[data-testid="custom-feedback-container"],[data-alef-feedback]';
+  const MAX_VISUALS=3;
+  const MAX_VISUAL_BYTES=1_048_576;
+  const QUESTION_ROOTS='[data-alef-question],[data-question-id],[data-testid="question-renderer"],[data-testid="new-question-renderer"],'+WEAVER_QUESTIONS;
+  function visibleVisual(el) {
+    if(!isElement(el)||!el.isConnected||!el.getClientRects().length)return false;
+    for(let node=el;node;node=node.parentElement||node.getRootNode()?.host) {
+      const style=view(node).getComputedStyle(node);
+      if(node.matches('[hidden],[inert]')||style.display==='none'||['hidden','collapse'].includes(style.visibility))return false;
+    }
+    return true;
+  }
+  const visualAll=(query,scope)=>[...new Set(roots(scope).flatMap(root=>[...root.querySelectorAll(query)]))].filter(visibleVisual);
+  function authoredScope(container) {
+    const scope=container.closest('[data-testid="ncle-activity-page-player"],[data-testid="content-page-body-player"],[data-alef-question-scope],.slide-container,[data-testid="slide-container"]');
+    if(!scope||scope===container)return container;
+    const questions=uniqueNodes(all(QUESTION_ROOTS,scope));
+    return questions.length===1&&questions[0]===container?scope:container;
+  }
+  function visualNodes(container) {
+    const scope=authoredScope(container),found=[],seen=new Set();
+    const optionRows=optionNodes(container).map(describeOption);
+    function add(node,kind,source) {
+      if(!visibleVisual(node)||node.closest(VISUAL_EXCLUSIONS))return;
+      const ownerQuestion=node.closest(QUESTION_ROOTS),hiddenSlide=node.closest('[aria-hidden="true"]');
+      if(ownerQuestion&&ownerQuestion!==container&&!container.contains(ownerQuestion))return;
+      if(hiddenSlide&&!hiddenSlide.contains(container)&&hiddenSlide.querySelector(QUESTION_ROOTS))return;
+      const option=optionRows.find(row=>row.node===node||row.node.contains(node));
+      const box=node.getBoundingClientRect();
+      if(Math.max(box.width,box.height)<40&&(node.closest('[role="presentation"],[aria-hidden="true"]')||!option&&node.closest('button,[role="button"]')))return;
+      const alt=clean(node.getAttribute('alt')||node.getAttribute('aria-label')).slice(0,240);
+      const id='visual-'+hash(JSON.stringify([kind,source,option?.id||'']));
+      if(seen.has(id))return;
+      seen.add(id);
+      found.push({node,kind,source,id,alt,...(option?{optionId:option.id}:{})});
+    }
+    for(const node of visualAll('img,canvas,svg',scope)) {
+      if(node.tagName.toLowerCase()==='img')add(node,'image',node.currentSrc||node.src||node.getAttribute('src')||'unloaded');
+      else if(node.tagName.toLowerCase()==='canvas') {
+        let pixels='unreadable';try{pixels=node.toDataURL('image/png');}catch{}
+        add(node,'canvas',`${node.width}x${node.height}:${hash(pixels)}`);
+      } else if(!node.parentElement?.closest('svg')) {
+        const box=node.getBoundingClientRect();
+        if(node.getAttribute('role')==='img'||box.width>=40&&box.height>=40)add(node,'svg',node.outerHTML);
+      }
+    }
+    for(const node of [scope,...visualAll('*',scope)]) {
+      if(node.closest(VISUAL_EXCLUSIONS)||node.closest('svg')||node.matches('img,canvas'))continue;
+      const box=node.getBoundingClientRect();
+      if(box.width<40||box.height<40)continue;
+      const background=view(node).getComputedStyle(node).backgroundImage;
+      for(const match of background.matchAll(/url\(\s*(?:"([^"]*)"|'([^']*)'|([^)]*))\s*\)/g)) {
+        add(node,'background',match[1]||match[2]||match[3]?.trim()||'');
+      }
+    }
+    for(const node of visualAll('[role="img"],[data-alef-visual]',scope)) {
+      const box=node.getBoundingClientRect();
+      if(Math.max(box.width,box.height)<40&&!node.hasAttribute('data-alef-visual'))continue;
+      if(!found.some(entry=>entry.node===node||node.contains(entry.node)))add(node,'unsupported',node.outerHTML);
+    }
+    return found;
+  }
+  const visualMetadata=rows=>rows.map(({id,kind,alt,optionId})=>({id,kind,alt,...(optionId?{optionId}:{})}));
+  function referencesDiagram(value) {
+    return /\b(?:figure|diagram|pictured|illustration)\b|\b(?:graph|image|picture)\s+(?:below|above|shown|provided)\b|(?:الشكل|الشكلين|الرسم|الصورة)\s+(?:المقابل|التالي|الموضح|ادناه|اعلاه)|الرسم البياني|(?:الشكل|الشكلين).{0,100}(?:تمدد|معامل التمدد)/i.test(norm(value));
+  }
+  async function readyImage(image) {
+    const deadline=Date.now()+4500;
+    while(!image.complete) {
+      assertNotCancelled();
+      if(Date.now()>=deadline)throw new Error('لم يكتمل تحميل صورة السؤال؛ لم تُرسل بيانات ناقصة للحل.');
+      await delay(40);
+    }
+    assertNotCancelled();
+    if(!image.naturalWidth||!image.naturalHeight)throw new Error('تعذّرت قراءة صورة السؤال؛ انتظر تحميل الرسم ثم أعد المحاولة.');
+    return image;
+  }
+  async function imageAt(url,owner,anonymous=false) {
+    if(!/^(?:https?:|data:image\/(?:png|jpe?g|webp|gif|svg\+xml)[;,]|blob:)/i.test(url))throw new Error('صيغة صورة السؤال غير مدعومة للقراءة المرئية.');
+    const image=new owner.Image();
+    if(anonymous)image.crossOrigin='anonymous';
+    image.src=url;
+    return readyImage(image);
+  }
+  function rasterize(source,width,height,owner) {
+    if(!width||!height)throw new Error('أبعاد الرسم غير صالحة للقراءة.');
+    const scale=Math.min(1,1600/Math.max(width,height));
+    const canvas=owner.document.createElement('canvas');
+    canvas.width=Math.max(1,Math.round(width*scale));canvas.height=Math.max(1,Math.round(height*scale));
+    const ctx=canvas.getContext('2d');
+    ctx.fillStyle='#fff';ctx.fillRect(0,0,canvas.width,canvas.height);ctx.drawImage(source,0,0,canvas.width,canvas.height);
+    let encoded=canvas.toDataURL('image/png');
+    const bytes=value=>Math.floor((value.length-value.indexOf(',')-1)*3/4);
+    if(bytes(encoded)>MAX_VISUAL_BYTES)encoded=canvas.toDataURL('image/jpeg',.88);
+    if(bytes(encoded)>MAX_VISUAL_BYTES) {
+      const smaller=owner.document.createElement('canvas');smaller.width=Math.round(canvas.width*.75);smaller.height=Math.round(canvas.height*.75);
+      smaller.getContext('2d').drawImage(canvas,0,0,smaller.width,smaller.height);encoded=smaller.toDataURL('image/jpeg',.8);
+    }
+    if(bytes(encoded)>MAX_VISUAL_BYTES)throw new Error('حجم الرسم يتجاوز حد القراءة؛ لم تُحذف تفاصيل منه لإرسال جواب تخميني.');
+    const [,mimeType,data]=encoded.match(/^data:(image\/(?:png|jpeg));base64,(.+)$/)||[];
+    if(!data)throw new Error('تعذّر تحويل الرسم إلى صورة قابلة للقراءة.');
+    return {data,mimeType};
+  }
+  async function captureVisual(entry) {
+    const {node,kind,source}=entry,owner=view(node);
+    if(kind==='unsupported')throw new Error('يحتوي السؤال على رسم لا يمكن التقاطه كاملًا؛ لم تُرسل مسألة ناقصة للحل.');
+    if(kind==='canvas')return rasterize(node,node.width,node.height,owner);
+    if(kind==='svg') {
+      if(node.querySelector('foreignObject'))throw new Error('يتضمن الرسم المتجه محتوى لا يمكن التقاطه كاملًا؛ لم تُحذف معلومات منه للحل.');
+      const copy=node.cloneNode(true),original=[node,...node.querySelectorAll('*')],cloned=[copy,...copy.querySelectorAll('*')];
+      for(let index=0;index<original.length;index++) {
+        const current=original[index],target=cloned[index],style=owner.getComputedStyle(current);
+        for(const attr of [...target.attributes])if(/^on/i.test(attr.name))target.removeAttribute(attr.name);
+        for(const property of ['fill','stroke','stroke-width','stroke-linecap','stroke-linejoin','opacity','font-family','font-size','font-weight','text-anchor'])target.style.setProperty(property,style.getPropertyValue(property));
+        for(const attr of ['href','xlink:href'])if(target.hasAttribute(attr)&&!target.getAttribute(attr).startsWith('#'))throw new Error('الرسم المتجه يعتمد على ملف خارجي؛ تعذّرت قراءة كل بياناته.');
+      }
+      copy.querySelectorAll('script,foreignObject,style').forEach(child=>child.remove());
+      const box=node.getBoundingClientRect();
+      const width=node.viewBox?.baseVal?.width||node.width?.baseVal?.value||box.width;
+      const height=node.viewBox?.baseVal?.height||node.height?.baseVal?.value||box.height;
+      copy.setAttribute('xmlns','http://www.w3.org/2000/svg');copy.setAttribute('width',String(width));copy.setAttribute('height',String(height));
+      const url=owner.URL.createObjectURL(new owner.Blob([new owner.XMLSerializer().serializeToString(copy)],{type:'image/svg+xml'}));
+      try{return rasterize(await imageAt(url,owner),width,height,owner);}finally{owner.URL.revokeObjectURL(url);}
+    }
+    if(kind==='image') {
+      await readyImage(node);
+      try{return rasterize(node,node.naturalWidth,node.naturalHeight,owner);}catch(error) {
+        if(error.name!=='SecurityError')throw error;
+      }
+    }
+    try {
+      const image=await imageAt(source,owner,/^https?:/i.test(source));
+      return rasterize(image,image.naturalWidth,image.naturalHeight,owner);
+    }catch(error) {
+      assertNotCancelled();
+      throw new Error('تعذّرت قراءة جميع صور السؤال من مصدرها. لم يُحل السؤال كنص ناقص أو تُرسل إجابة تخمينية.');
+    }
+  }
+  async function getVisuals(message) {
+    assertNotCancelled();
+    const question=readQuestion().question;
+    if(!question||question.id!==message.questionId||question.fingerprint!==message.questionFingerprint)throw new Error('تغيّر السؤال قبل قراءة الرسم؛ لم تُستخدم صورة لسؤال آخر.');
+    const entries=visualNodes(questionContainer());
+    if(question.requiresVision&&!entries.length)throw new Error('يشير السؤال إلى رسم غير ظاهر؛ لم تُرسل مسألة ناقصة للنموذج.');
+    if(entries.length>MAX_VISUALS)throw new Error('السؤال يحتوي على أكثر من ثلاث صور؛ لم تُحذف صور لازمة لإكمال الحل.');
+    const images=[];
+    for(const entry of entries) {
+      assertNotCancelled();assertQuestion(question);
+      const data=await captureVisual(entry);
+      assertNotCancelled();assertQuestion(question);
+      images.push({id:entry.id,...data,alt:entry.alt,...(entry.optionId?{optionId:entry.optionId}:{})});
+    }
+    return {ok:true,questionId:question.id,questionFingerprint:question.fingerprint,requiresVision:question.requiresVision,images};
   }
   function promptText(container) {
     // The short prompt often only says “Select the correct answer.” The actual
@@ -413,7 +568,9 @@
     let value=text(copy);
     if(!value&&container.getAttribute('aria-labelledby'))value=clean(container.getAttribute('aria-labelledby').split(/\s+/).map(id=>text(container.ownerDocument.getElementById(id))).join(' '));
     const passage=text(first('[data-testid="question-passage-content"],[data-alef-passage]',container));
-    return clean((passage?passage+' ':'')+value);
+    const context=all('[data-alef-question-context],[data-testid="question-statement-container"],.question-statement-container',authoredScope(container)).filter(node=>!container.contains(node)&&!node.contains(container));
+    const extra=uniqueNodes(context).map(text).filter(Boolean).join(' ');
+    return clean((extra?extra+' ':'')+(passage?passage+' ':'')+value);
   }
   function matchingControls(container) {
     if(container.matches('.dnd-container.question-widget')){
@@ -458,8 +615,9 @@
     if(!container)return {ok:true,question:null,completed:false,canNext:!!button('next')};
     if(first('math-field',container))throw new Error('هذا السؤال يستخدم محرر معادلات خاصًا؛ يلزم ربط المحرر قبل إدخال الإجابة.');
     if(first('[data-testid="question-passage-collapsed-caret"],[data-alef-passage-toggle][aria-expanded="false"]',container))return {ok:true,question:null,completed:false,needsPreparation:true,canNext:false};
-    if(all('img:not([role="presentation"]),canvas',container).some(node=>!node.closest('.mcq-icon-container,.mcq-option-icon-container')))throw new Error('السؤال يحتوي على صورة أو رسم يحتاج قراءة مرئية؛ لم تُخمن الإجابة.');
     let prompt=promptText(container);
+    const visuals=visualMetadata(visualNodes(container));
+    const requiresVision=visuals.length>0||referencesDiagram(prompt);
     const matching=matchingControls(container);
     const drops=dropdownControls(container);
     const controls=optionNodes(container).map(describeOption);
@@ -483,12 +641,13 @@
       if(inputs.length!==1)throw new Error('هذا السؤال يحتاج نوع تفاعل لم يُربط بعد؛ لن تُرسل إجابة تخمينية.');
       type='text';
     }
+    if(!prompt&&visuals.length)prompt='اقرأ السؤال الظاهر في الصور المرفقة، ثم أجب اعتمادًا على بياناتها.';
     if(!prompt)throw new Error('لم يظهر نص السؤال بوضوح.');
     if(options.some(option=>!option.text)||new Set(options.map(option=>option.id)).size!==options.length)throw new Error('خيارات الإجابة غير واضحة أو متكررة.');
-    const fingerprint=hash(JSON.stringify([prompt,type,options,extra,text(first('[data-testid="progress-bar-slide-count"]'))]));
+    const fingerprint=hash(JSON.stringify([prompt,type,options,extra,visuals,text(first('[data-testid="progress-bar-slide-count"]'))]));
     const code=first('[data-testid^="question-renderer-"]',container)?.getAttribute('data-testid');
     const id=container.getAttribute('data-alef-question')||container.getAttribute('data-question-id')||code||`question-${fingerprint}`;
-    return {ok:true,question:{id,text:prompt,type,options,...extra,fingerprint},completed:false,canNext:!!button('next'),feedback:feedback(container)};
+    return {ok:true,question:{id,text:prompt,type,options,...extra,fingerprint,...(requiresVision?{requiresVision:true,visuals}:{})},completed:false,canNext:!!button('next'),feedback:feedback(container)};
   }
   function setValue(control,value) {
     const realm=view(control),proto=control.tagName==='TEXTAREA'?realm.HTMLTextAreaElement.prototype:control.tagName==='SELECT'?realm.HTMLSelectElement.prototype:realm.HTMLInputElement.prototype;
@@ -633,7 +792,7 @@
   function diagnostics(){
     const snapshot=inspect();
     const cleanUrl=value=>{try{const url=new URL(value,location.href);return url.origin+url.pathname+(url.hash.startsWith('#/')?url.hash.split('?')[0]:'');}catch{return '';}};
-    return {ok:true,diagnostics:{version:'0.4.2',page:{url:cleanUrl(location.href)},stage:snapshot.stage,subjects:snapshot.subjects,lessons:snapshot.lessons.map(({href,...lesson})=>({...lesson,href:href?cleanUrl(href):undefined})),navigation:snapshot.navigation,issues:snapshot.diagnostics,frames:[...document.querySelectorAll('iframe')].map(frame=>({url:cleanUrl(frame.src),sameOrigin:!!frame.contentDocument})),controls:all('button,[role="button"],[data-testid]').filter(node=>!node.closest('form')&&!node.matches('input,textarea')).slice(0,100).map(node=>({tag:node.tagName,role:node.getAttribute('role'),testId:node.getAttribute('data-testid'),classes:[...node.classList].slice(0,6),label:clean(node.getAttribute('aria-label')|| (node.matches('button,[role="button"]')?text(node):'')).slice(0,100)}))}};
+    return {ok:true,diagnostics:{version:'0.5.0',page:{url:cleanUrl(location.href)},stage:snapshot.stage,subjects:snapshot.subjects,lessons:snapshot.lessons.map(({href,...lesson})=>({...lesson,href:href?cleanUrl(href):undefined})),navigation:snapshot.navigation,issues:snapshot.diagnostics,frames:[...document.querySelectorAll('iframe')].map(frame=>({url:cleanUrl(frame.src),sameOrigin:!!frame.contentDocument})),controls:all('button,[role="button"],[data-testid]').filter(node=>!node.closest('form')&&!node.matches('input,textarea')).slice(0,100).map(node=>({tag:node.tagName,role:node.getAttribute('role'),testId:node.getAttribute('data-testid'),classes:[...node.classList].slice(0,6),label:clean(node.getAttribute('aria-label')|| (node.matches('button,[role="button"]')?text(node):'')).slice(0,100)}))}};
   }
   function handle(message){
     rootsCache=null;frameDiagnostics=[];settings(message.selectors);
@@ -641,6 +800,7 @@
       case 'ALEF_SCAN':case 'ALEF_INSPECT':return inspect();
       case 'ALEF_DIAGNOSTICS':return diagnostics();
       case 'ALEF_GET_QUESTION':return readQuestion();
+      case 'ALEF_GET_VISUALS':return getVisuals(message);
       case 'ALEF_PREPARE_QUESTION':assertNotCancelled();return prepareQuestion();
       case 'ALEF_CANCEL':cancelled=true;return {ok:true};
       case 'ALEF_SELECT_SUBJECT':{

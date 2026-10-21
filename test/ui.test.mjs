@@ -145,7 +145,9 @@ test('dashboard subject choice, start/stop, event rendering and permission reque
     await page.locator('#subjects button').first().click();
     assert.equal(await page.locator('#start').isEnabled(),true);
     await capture(page,'dashboard-fixture');
-    assert.equal(await page.locator('#verify').isChecked(),false);
+    assert.equal(await page.locator('#verify').isChecked(),true);
+    assert.ok((await page.locator('#solve-mode').textContent()).includes('حلّان مستقلان'));
+    await page.locator('label').filter({has:page.locator('#verify')}).click();
     assert.ok((await page.locator('#solve-mode').textContent()).includes('الوضع السريع'));
     await page.locator('label').filter({has:page.locator('#verify')}).click();
     assert.ok((await page.locator('#solve-mode').textContent()).includes('حلّان مستقلان'));
@@ -155,7 +157,7 @@ test('dashboard subject choice, start/stop, event rendering and permission reque
     assert.equal(await page.locator('#start').isDisabled(),true);
     assert.equal(await page.locator('#connect').isDisabled(),true);
     const start=await page.evaluate(()=>__uiTest.messages.find(message=>message.type==='START'));
-    assert.equal(start.subjectId,'math');assert.equal(start.config.verify,true);assert.equal(start.config.autoSubmit,true);
+    assert.equal(start.subjectId,'math');assert.equal(start.config.verify,true);assert.equal(start.config.qualityMode,true);assert.equal(start.config.autoSubmit,true);
     await page.waitForFunction(()=>__uiTest.local.alefConfig?.verify===true);
     await page.evaluate(()=>__uiTest.emit({kind:'answer',message:'وصلت إجابة تجريبية.',timestamp:Date.now(),stats:{solved:1,review:0,total:1},
       question:{text:'ما ناتج 6 × 7؟',options:[{id:'b',text:'42'}]},answer:{optionIds:['b'],text:'42',explanation:'6 × 7 = 42',confidence:.97}}));
@@ -180,7 +182,7 @@ test('server check shows local model readiness without paid credentials and prec
   const harness=await dashboardHarness();
   try{
     const {page}=harness;
-    let health={ok:true,configured:true,provider:'ollama',model:'qwen3:8b',modelReady:true};
+    let health={ok:true,protocolVersion:2,configured:true,provider:'ollama',model:'qwen3:8b',modelReady:true,visionModel:'qwen3-vl:8b',visionInstalled:true,visionReady:true};
     let requests=0;
     await page.route('http://127.0.0.1:4318/api/health',async route=>{
       requests++;
@@ -191,7 +193,21 @@ test('server check shows local model readiness without paid credentials and prec
     await page.locator('#check-server').click();
     await page.waitForFunction(()=>document.querySelector('#server-status').textContent.includes('qwen3:8b'));
     assert.ok((await page.locator('#server-status').textContent()).includes('متصل محليًا'));
+    assert.ok((await page.locator('#server-status').textContent()).includes('الصور: qwen3-vl:8b'));
     assert.ok((await page.locator('#server-status').textContent()).includes('دون مفتاح API'));
+    health={ok:true,protocolVersion:2,configured:true,provider:'ollama',model:'qwen3:8b',modelReady:true,visionModel:'qwen3-vl:8b',visionInstalled:false,visionReady:false,visionIssue:'vision_model_not_found',visionMessage:'النموذج البصري غير مثبت.'};
+    await page.locator('#check-server').click();
+    await page.waitForFunction(()=>document.querySelector('#server-status').textContent.includes('الصور غير جاهزة'));
+    assert.ok((await page.locator('#server-status').textContent()).includes('متصل للنصوص'));
+    assert.ok((await page.locator('#server-status').textContent()).includes('START-WINDOWS.cmd'));
+    assert.ok((await page.locator('#server-status').textContent()).includes(health.visionMessage));
+    health={...health,visionInstalled:true,visionIssue:'vision_not_supported',visionMessage:'النموذج المثبت لا يدعم الصور.'};
+    await page.locator('#check-server').click();
+    await page.waitForFunction(()=>document.querySelector('#server-status').textContent.includes('لا يدعم الصور'));
+    assert.equal((await page.locator('#server-status').textContent()).includes('متصل محليًا'),false,'Text readiness alone cannot imply image readiness');
+    health={ok:true,configured:true,provider:'ollama',model:'qwen3:8b',modelReady:true};
+    await page.locator('#check-server').click();
+    await page.waitForFunction(()=>document.querySelector('#server-status').textContent.includes('حدّث ملفات الخادم'));
     health={ok:true,configured:false,provider:'ollama',model:'qwen3:8b',modelReady:false,issue:'model_missing',message:'النموذج qwen3:8b غير موجود. حمّله باستخدام ollama pull qwen3:8b.'};
     await page.locator('#check-server').click();
     await page.waitForFunction(()=>document.querySelector('#server-status').textContent.includes('غير موجود'));
@@ -201,7 +217,7 @@ test('server check shows local model readiness without paid credentials and prec
     await page.waitForFunction(()=>document.querySelector('#server-status').textContent.includes('افتح Ollama'));
     assert.equal(await page.locator('#server-status').textContent(),health.message);
     assert.equal((await page.locator('#server-status').textContent()).includes('SOLVER_API_KEY'),false);
-    assert.equal(requests,3);
+    assert.equal(requests,6);
     assert.deepEqual(harness.errors,[]);
   }finally{await harness.close();}
 });
@@ -314,18 +330,20 @@ test('session completion replaces waiting-for-next status and restores the final
 });
 
 
-test('fresh dashboard starts in fast mode and persists one-response selection without credentials',async()=>{
+test('fresh dashboard starts in higher accuracy mode and persists reasoning plus independent review without credentials',async()=>{
   const harness=await dashboardHarness({connected:true});
   try{
     const {page}=harness;
-    assert.equal(await page.locator('#verify').isChecked(),false);
-    assert.ok((await page.locator('#solve-mode').textContent()).includes('حل واحد لكل سؤال'));
+    assert.equal(await page.locator('#verify').isChecked(),true);
+    assert.ok((await page.locator('#solve-mode').textContent()).includes('تفكير متأنٍّ'));
     await page.locator('#subjects button').first().click();
     await page.locator('#start').click();
-    await page.waitForFunction(()=>__uiTest.local.alefConfig?.verify===false);
+    await page.waitForFunction(()=>__uiTest.local.alefConfig?.verify===true);
     const state=await page.evaluate(()=>({start:__uiTest.messages.find(message=>message.type==='START'),stored:__uiTest.local.alefConfig}));
-    assert.equal(state.start.config.verify,false);
-    assert.equal(state.stored.verify,false);
+    assert.equal(state.start.config.verify,true);
+    assert.equal(state.start.config.qualityMode,true);
+    assert.equal(state.stored.verify,true);
+    assert.equal(state.stored.qualityMode,true);
     assert.equal('token' in state.stored,false);
     assert.equal(await page.locator('#verify').isDisabled(),true);
     assert.deepEqual(harness.errors,[]);
@@ -334,7 +352,7 @@ test('fresh dashboard starts in fast mode and persists one-response selection wi
 
 for(const verify of [true,false]) {
   test(`saved verification preference ${verify} survives reopening and starts unchanged`,async()=>{
-    const harness=await dashboardHarness({connected:true,savedConfig:{verify,autoSubmit:true,skipInstruction:true}});
+    const harness=await dashboardHarness({connected:true,savedConfig:{verify,qualityMode:verify,autoSubmit:true,skipInstruction:true}});
     try{
       const {page}=harness;
       assert.equal(await page.locator('#verify').isChecked(),verify);
@@ -343,6 +361,7 @@ for(const verify of [true,false]) {
       await page.locator('#start').click();
       await page.waitForFunction(()=>__uiTest.messages.some(message=>message.type==='START'));
       assert.equal(await page.evaluate(()=>__uiTest.messages.find(message=>message.type==='START').config.verify),verify);
+      assert.equal(await page.evaluate(()=>__uiTest.messages.find(message=>message.type==='START').config.qualityMode),verify);
       assert.deepEqual(harness.errors,[]);
     }finally{await harness.close();}
   });
@@ -361,9 +380,68 @@ test('existing verified mode can be switched to fast mode and persists the new s
     await page.locator('#start').click();
     await page.waitForFunction(()=>__uiTest.local.alefConfig?.verify===false);
     assert.equal(await page.evaluate(()=>__uiTest.messages.find(message=>message.type==='START').config.verify),false);
+    assert.equal(await page.evaluate(()=>__uiTest.messages.find(message=>message.type==='START').config.qualityMode),false);
+    await page.locator('#stop').click();
+    const reopened=await harness.reopen();
+    assert.equal(await reopened.locator('#verify').isChecked(),false,'The one-time migration cannot override an explicit fast-mode choice');
     assert.deepEqual(harness.errors,[]);
   }finally{await harness.close();}
 });
+
+test('upgrading legacy fast settings enables higher accuracy once while preserving pairing and other settings',async()=>{
+  const harness=await dashboardHarness({connected:true,savedConfig:{verify:false,autoSubmit:false,skipInstruction:false},savedToken:'upgrade-ui-pairing-token-not-a-real-secret'});
+  try{
+    assert.equal(await harness.page.locator('#verify').isChecked(),true);
+    assert.equal(await harness.page.locator('#auto-submit').isChecked(),false);
+    assert.equal(await harness.page.locator('#skip-instruction').isChecked(),false);
+    assert.equal(harness.stores.local.alefConfig.qualityMode,true);
+    assert.equal(harness.stores.local.alefConfig.verify,true);
+    assert.equal(harness.stores.local.alefConfig.autoSubmit,false);
+    assert.equal(harness.stores.local.alefPairingToken,'upgrade-ui-pairing-token-not-a-real-secret');
+    assert.equal(Object.hasOwn(harness.stores.local.alefConfig,'token'),false);
+    const reopened=await harness.reopen({clearSession:true});
+    assert.equal(await reopened.locator('#verify').isChecked(),true);
+    await reopened.locator('.settings-trigger').first().click();
+    assert.equal(await reopened.locator('#pairing-token').inputValue(),'upgrade-ui-pairing-token-not-a-real-secret');
+    assert.deepEqual(harness.errors,[]);
+  }finally{await harness.close();}
+});
+
+test('saving an explicit fast-mode opt-out before starting preserves both quality and review flags after reopening',async()=>{
+  const harness=await dashboardHarness();
+  try{
+    const {page}=harness;
+    await page.locator('label').filter({has:page.locator('#verify')}).click();
+    await page.locator('.settings-trigger').first().click();
+    await page.locator('#settings-form button[type="submit"]').click();
+    await page.waitForFunction(()=>!document.querySelector('#settings-dialog').open);
+    assert.equal(harness.stores.local.alefConfig.qualityMode,false);
+    assert.equal(harness.stores.local.alefConfig.verify,false);
+    assert.equal(Object.hasOwn(harness.stores.local.alefConfig,'token'),false);
+    const reopened=await harness.reopen({clearSession:true});
+    assert.equal(await reopened.locator('#verify').isChecked(),false);
+    assert.ok((await reopened.locator('#solve-mode').textContent()).includes('الوضع السريع'));
+    assert.deepEqual(harness.errors,[]);
+  }finally{await harness.close();}
+});
+
+for(const text of ['ما معامل التمدد في الرسم؟','What is the scale factor shown in the figure?']) {
+  test(`a visual question keeps its image requirement visible until the next text question: ${text}`,async()=>{
+    const harness=await dashboardHarness({connected:true});
+    try{
+      const {page}=harness;
+      await page.evaluate(text=>__uiTest.emit({kind:'question',message:'جارٍ الحل',question:{id:'visual',fingerprint:'visual',text,requiresVision:true,options:[]}}),text);
+      assert.equal(await page.locator('#question-text').textContent(),text);
+      assert.equal(await page.locator('#question-media-note').isVisible(),true);
+      assert.ok((await page.locator('#answer-state').textContent()).includes('الرسم أو الصورة'));
+      assert.equal(await page.locator('#answer-box').isVisible(),false);
+      await page.evaluate(()=>__uiTest.emit({kind:'question',message:'السؤال التالي',question:{id:'text',fingerprint:'text',text:'2 + 2 = ?',requiresVision:false,options:[]}}));
+      assert.equal(await page.locator('#question-media-note').isVisible(),false);
+      assert.ok((await page.locator('#answer-state').textContent()).includes('جارٍ حل هذا السؤال'));
+      assert.deepEqual(harness.errors,[]);
+    }finally{await harness.close();}
+  });
+}
 
 test('pasted pairing token saves without submitting and survives closing the dashboard with an empty new session',async()=>{
   const harness=await dashboardHarness({sessionToken:null});

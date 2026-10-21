@@ -14,9 +14,13 @@ function launcherHarness(settings = {}) {
   const logs = [];
   const servers = [];
   let running = settings.running !== false;
-  let installed = settings.installed !== false;
   const env = Object.freeze({ LOCALAPPDATA: 'C:\\Users\\Student\\AppData\\Local', ...settings.env });
   const model = env.SOLVER_LOCAL_MODEL || (env.SOLVER_PROVIDER === 'ollama' ? env.SOLVER_MODEL : '') || 'qwen3:8b';
+  const visionModel = env.SOLVER_LOCAL_VISION_MODEL || (env.SOLVER_PROVIDER === 'ollama' ? env.SOLVER_VISION_MODEL : '') || 'qwen3-vl:8b';
+  const installed = new Set([
+    ...(settings.installed !== false ? [model] : []),
+    ...(settings.visionInstalled !== false ? [visionModel] : []),
+  ]);
   const spawnImpl = (command, args, options) => {
     const call = { command, args, options, input: undefined, kills: 0 };
     calls.push(call);
@@ -29,8 +33,8 @@ function launcherHarness(settings = {}) {
       if (args[0] === '--version' && (settings.runtimeMissing || (settings.fallbackOnly && command === 'ollama'))) {
         child.emit('error', Object.assign(new Error('Missing executable'), { code: 'ENOENT' }));
       } else if (args[0] === 'pull') {
-        if (settings.pullFails) child.emit('close', 1);
-        else { installed = !settings.badVerification; child.emit('close', 0); }
+        if (settings.pullFails || settings.pullFailsModel === args[1]) child.emit('close', 1);
+        else { if (!settings.badVerification) installed.add(args[1]); child.emit('close', 0); }
       } else if (command === 'clip.exe' && settings.clipFails) {
         child.emit('error', Object.assign(new Error('Clipboard unavailable'), { code: 'ENOENT' }));
       } else child.emit('close', 0);
@@ -41,10 +45,11 @@ function launcherHarness(settings = {}) {
     fetchCalls.push({ url, options });
     if (url.endsWith('/api/tags')) {
       if (!running) throw new Error('Not running');
-      return Response.json({ models: installed ? [{ name: model }] : [] });
+      return Response.json({ models: [...installed].map(name => ({ name })) });
     }
     if (url.endsWith('/api/health')) return Response.json({
-      ok: true, provider: 'ollama', model, configured: !settings.badHealth, modelReady: !settings.badHealth,
+      ok: true, provider: 'ollama', model, visionModel, configured: !settings.badHealth, modelReady: !settings.badHealth,
+      visionReady: !settings.badVisionHealth,
     });
     throw new Error('Unexpected URL');
   };
@@ -87,11 +92,13 @@ test('missing Ollama checks PATH and the supported Windows user installation the
   assert.equal(harness.servers.length, 0);
 });
 
-test('installed model starts without any API key and copies token through stdin without logging it', async t => {
+test('installed text and vision models start without any API key and copy token through stdin without logging it', async t => {
   const harness = launcherHarness({ fallbackOnly: true });
   const app = await startWindowsAssistant(harness.options);
   t.after(() => app.close());
   assert.equal(app.model, 'qwen3:8b');
+  assert.equal(app.visionModel, 'qwen3-vl:8b');
+  assert.equal(harness.servers[0].config.visionModel, 'qwen3-vl:8b');
   assert.equal(harness.servers[0].config.provider, 'ollama');
   assert.equal(harness.servers[0].config.apiKey, '');
   assert.deepEqual(harness.servers[0].bound, { port: 4318, host: '127.0.0.1' });
@@ -119,6 +126,68 @@ test('launcher starts only its own Ollama service, pulls the selected model, ver
   await app.close();
   assert.equal(serve.kills, 1);
   assert.equal(harness.servers[0].closes, 1);
+});
+
+test('an existing text model only downloads the missing visual model and preserves the configured D model directory', async t => {
+  const harness = launcherHarness({ visionInstalled: false, env: { OLLAMA_MODELS: 'D:\\ollama\\models' } });
+  const app = await startWindowsAssistant(harness.options);
+  t.after(() => app.close());
+  const pulls = harness.calls.filter(call => call.args[0] === 'pull');
+  assert.deepEqual(pulls.map(call => call.args), [['pull', 'qwen3-vl:8b']]);
+  assert.equal(pulls[0].options.env.OLLAMA_MODELS, 'D:\\ollama\\models');
+  assert.equal(harness.env.OLLAMA_MODELS, 'D:\\ollama\\models');
+  assert.ok(harness.logs.some(message => message.includes('العربية والإنجليزية') && message.includes('مرة واحدة')));
+  assert.equal(harness.servers[0].config.model, 'qwen3:8b');
+  assert.equal(harness.servers[0].config.visionModel, 'qwen3-vl:8b');
+});
+
+test('first setup downloads and verifies both models in order before opening the local assistant', async t => {
+  const harness = launcherHarness({ installed: false, visionInstalled: false });
+  const app = await startWindowsAssistant(harness.options);
+  t.after(() => app.close());
+  assert.deepEqual(harness.calls.filter(call => call.args[0] === 'pull').map(call => call.args), [
+    ['pull', 'qwen3:8b'], ['pull', 'qwen3-vl:8b'],
+  ]);
+  assert.equal(harness.fetchCalls.filter(call => call.url.endsWith('/api/tags')).length, 3);
+  assert.ok(harness.calls.findIndex(call => call.command === 'clip.exe') > harness.calls.findIndex(call => call.args[1] === 'qwen3-vl:8b'));
+  assert.equal(harness.servers.length, 1);
+});
+
+test('a failed visual download leaves the existing text model alone and never starts or claims full readiness', async () => {
+  const harness = launcherHarness({ visionInstalled: false, pullFailsModel: 'qwen3-vl:8b' });
+  await assert.rejects(startWindowsAssistant(harness.options), /لم يكتمل تنزيل النموذج qwen3-vl:8b/);
+  assert.equal(harness.servers.length, 0);
+  assert.deepEqual(harness.calls.filter(call => call.args[0] === 'pull').map(call => call.args), [['pull', 'qwen3-vl:8b']]);
+  assert.equal(harness.calls.some(call => call.command === 'clip.exe'), false);
+  assert.equal(harness.logs.some(message => message.startsWith('الخادم جاهز')), false);
+});
+
+test('visual model readiness must confirm capability rather than mere presence in the model list', async () => {
+  const harness = launcherHarness({ badVisionHealth: true });
+  await assert.rejects(startWindowsAssistant(harness.options), /جاهزية النموذج المرئي/);
+  assert.equal(harness.servers[0].closes, 1);
+  assert.equal(harness.calls.some(call => call.command === 'clip.exe'), false);
+  assert.equal(harness.logs.some(message => message.startsWith('الخادم جاهز')), false);
+});
+
+test('explicit local visual-model override is passed to the service and unsafe names fail before process launch', async t => {
+  const harness = launcherHarness({ visionInstalled: false, env: { SOLVER_LOCAL_VISION_MODEL: 'qwen2.5vl:7b' } });
+  const app = await startWindowsAssistant(harness.options);
+  t.after(() => app.close());
+  assert.equal(app.visionModel, 'qwen2.5vl:7b');
+  assert.equal(harness.servers[0].config.visionModel, 'qwen2.5vl:7b');
+  assert.deepEqual(harness.calls.find(call => call.args[0] === 'pull').args, ['pull', 'qwen2.5vl:7b']);
+  const invalid = launcherHarness({ env: { SOLVER_LOCAL_VISION_MODEL: 'qwen3-vl:8b & calc.exe' } });
+  await assert.rejects(startWindowsAssistant(invalid.options), /اسم النموذج المحلي غير صالح/);
+  assert.equal(invalid.calls.length, 0);
+});
+
+test('a single model configured for both tasks is downloaded once and must still pass visual capability health', async t => {
+  const harness = launcherHarness({ installed: false, visionInstalled: false, env: { SOLVER_LOCAL_MODEL: 'qwen3-vl:8b' } });
+  const app = await startWindowsAssistant(harness.options);
+  t.after(() => app.close());
+  assert.equal(app.model, app.visionModel);
+  assert.deepEqual(harness.calls.filter(call => call.args[0] === 'pull').map(call => call.args), [['pull', 'qwen3-vl:8b']]);
 });
 
 test('a failed model download never starts the assistant or claims readiness', async () => {

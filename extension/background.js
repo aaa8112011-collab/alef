@@ -1,5 +1,12 @@
 'use strict';
 
+// Pairing settings belong to extension pages and the worker, never content scripts.
+async function restrictLocalSettings() {
+  try { await chrome.storage.local?.setAccessLevel?.({accessLevel:'TRUSTED_CONTEXTS'}); }
+  catch { /* Older Chrome builds can omit this optional storage API. */ }
+}
+void restrictLocalSettings();
+
 const runs = new Map();
 const states = new Map();
 const reviewMessages = {
@@ -340,10 +347,11 @@ async function runLesson(tabId,subject,initial,lesson,config,origin,signal,state
       if (state.stats.total >= 1000) return {review:true,blocking:true,snapshot,message:'وصل التشغيل إلى حد 1000 سؤال. افحص التقدم ثم ابدأ جلسة جديدة.'};
       seenQuestions.add(identity);
       state.stats.total++;
-      await emit(tabId,'question','جارٍ حل السؤال والتحقق من الإجابة…',{question});
+      await emit(tabId,'question',config.verify?'جارٍ حل السؤال ثم التحقق بحل ثانٍ…':'جارٍ حل السؤال بالوضع السريع…',{question});
       let result;
       const rejected=rejectedAnswers.get(identity)||[];
       const requestQuestion=rejected.length?{...question,text:question.text+'\n\nPlatform feedback: these previous answers were rejected. Re-evaluate the question carefully. Do not repeat a rejected answer; lower confidence if the question is unclear.\n'+JSON.stringify(rejected.map(answer=>({optionIds:answer.optionIds,text:answer.text,matches:answer.matches})))}:question;
+      const solveStarted=Date.now();
       try { result = await solve(requestQuestion,subject.name,config,signal); }
       catch (error) { error.fatal = true;throw error; }
       assertActive(signal);
@@ -353,7 +361,8 @@ async function runLesson(tabId,subject,initial,lesson,config,origin,signal,state
         return {review:true,snapshot,question,answer,message:reviewMessages[result.reason] ||
           'الإجابة تحتاج مراجعة: الثقة منخفضة أو لم تتفق عمليتا الحل والتحقق.'};
       }
-      await emit(tabId,'answer','وصلت الإجابة؛ جارٍ مطابقتها مع السؤال الظاهر.',{question,answer});
+      const solveDurationMs=Date.now()-solveStarted;
+      await emit(tabId,'answer',`وصلت الإجابة خلال ${(solveDurationMs/1000).toFixed(1)} ثانية؛ جارٍ مطابقتها مع السؤال الظاهر.`,{question,answer,solveDurationMs});
       assertActive(signal);
       const applied = await pageMessage(tabId,{type:'ALEF_APPLY',questionId:question.id,
         questionFingerprint:question.fingerprint,answer,selectors:config.selectors,autoSubmit:config.autoSubmit},origin,signal);
@@ -429,7 +438,9 @@ async function run(tabId,subjectId,config,controller) {
     await pause(250,signal);
     let snapshot = await waitSnapshot(tabId,config,origin,signal,item=>!['unknown','subjects'].includes(item.stage));
     state.catalogClass=coreCatalog(snapshot)?observedCoreClass(snapshot.page?.url):null;
-    snapshot = await prepareCatalog(tabId,snapshot,config,origin,signal,{expandAll:true});
+    // Start with the available tasks instead of paging through a long catalog
+    // before the first answer. Refill the queue before reporting completion.
+    snapshot = await prepareCatalog(tabId,snapshot,config,origin,signal);
     const catalogMode = snapshot.stage === 'lessons';
     if (catalogMode) {
       state.catalogURL = snapshot.page?.url || (await checkedTab(tabId,origin)).url;
@@ -445,7 +456,14 @@ async function run(tabId,subjectId,config,controller) {
     await emit(tabId,'queue',`عُثر على ${state.stats.lessonsTotal} درس مفتوح غير مكتمل.`);
     for (let lessonLimit=0;lessonLimit<250;lessonLimit++) {
       assertActive(signal);
-      const lesson = state.queue.find(item=>item.status==='pending');
+      let lesson = state.queue.find(item=>item.status==='pending');
+      if(!lesson&&catalogMode&&coreCatalog(snapshot)&&snapshot.navigation?.some(item=>item.kind==='expand')) {
+        state.currentLesson=null;
+        snapshot=await prepareCatalog(tabId,snapshot,config,origin,signal,{expandAll:true});
+        updateQueue(state,snapshot);
+        await emit(tabId,'queue','إضافة بقية المهام المتاحة إلى قائمة الحل…');
+        lesson=state.queue.find(item=>item.status==='pending');
+      }
       if (!lesson) {
         state.currentLesson = null;
         await emit(tabId,'complete',state.stats.lessonsReview

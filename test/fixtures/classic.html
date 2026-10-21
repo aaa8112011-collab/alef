@@ -26,7 +26,7 @@
     {id:'dilations',title:'45. Dilations - Exit Ticket',overdue:true},
     {id:'arabic',title:'٣. مراجعة الأشكال باللغة العربية'},
   ];
-  const state={actions:[],completed:[],submissions:[],tab:null,filter:'todo',limit:2,lesson:null,step:0};
+  const state={actions:[],completed:[],submissions:[],tabEvents:[],tab:null,filter:'todo',limit:2,lesson:null,step:0};
   const record=(kind,values={})=>state.actions.push({kind,...values});
   const el=(tag,label,attrs={})=>{
     const node=document.createElement(tag);if(label)node.textContent=label;
@@ -41,9 +41,29 @@
     const nav=el('nav','',{'aria-label':'الدروس'});
     for(const[id,label]of [['forYou','صفحتي'],['assigned','المهام المسندة'],['allLessons','جميع الدروس']]){
       const testName={forYou:'foryou',assigned:'assigned',allLessons:'alllessons'}[id];
-      nav.append(button(label,`core-coursework-${testName}-tab-select`,()=>{
+      const trigger=button(label,`core-coursework-${testName}-tab-select`,()=>{
         record('tab',{tab:id});state.limit=2;renderCatalog(id);
-      },{role:'tab','aria-selected':String(tab===id)}));
+      },{role:'tab','data-slot':'tabs-trigger','aria-selected':String(tab===id),'data-state':tab===id?'active':'inactive'});
+      if(scenario==='radix-tabs'){
+        // Isolated reproduction of Radix TabsTrigger's primary-mousedown
+        // activation. A bare HTMLElement.click() does not select the tab.
+        trigger.onclick=()=>{state.tabEvents.push({type:'click',tab:id});};
+        trigger.onmousedown=event=>{
+          state.tabEvents.push({type:'mousedown',tab:id,button:event.button,ctrlKey:event.ctrlKey});
+          if(trigger.disabled||event.button!==0||event.ctrlKey){event.preventDefault();return;}
+          if(state.tab===id)return;
+          state.tab=id;state.limit=2;record('tab',{tab:id});
+          history.replaceState(null,'',`#/classes/test-class?tab=${id}`);
+          for(const item of nav.querySelectorAll('[role="tab"]')){
+            const selected=item===trigger;item.setAttribute('aria-selected',String(selected));item.dataset.state=selected?'active':'inactive';
+          }
+          // React retains the tab nodes until this interaction finishes. Keep
+          // them connected through mouseup/click before rendering the panel.
+          queueMicrotask(()=>renderCatalog(id));
+        };
+        trigger.onmouseup=()=>{state.tabEvents.push({type:'mouseup',tab:id});};
+      }
+      nav.append(trigger);
     }
     main.append(nav);
   }

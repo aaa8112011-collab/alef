@@ -1,7 +1,7 @@
 (() => {
   'use strict';
-  if (globalThis.__alefAssistantInstalled==='0.4.0') return;
-  globalThis.__alefAssistantInstalled = '0.4.0';
+  if (globalThis.__alefAssistantInstalled==='0.4.1') return;
+  globalThis.__alefAssistantInstalled = '0.4.1';
 
   let selectors = {};
   let subjects = new Map();
@@ -69,6 +69,17 @@
   function click(el) {
     if(!el?.isConnected || !visible(el) || disabled(el))throw new Error('العنصر غير متاح أو أصبح مقفلًا؛ أعد فحص الصفحة.');
     if(el.matches('a[href]') && !safeHref(el))throw new Error('رابط الوجهة خارج موقع ألف أو غير قابل للفتح.');
+    if(el.matches('[role="tab"]')) {
+      // Alef's Radix TabsTrigger selects on primary mousedown, not on click.
+      // Limit the event sequence to tabs: choices/submits must still click once.
+      const owner=view(el);
+      const event={bubbles:true,cancelable:true,composed:true,view:owner,button:0,ctrlKey:false};
+      el.dispatchEvent(new owner.MouseEvent('mousedown',{...event,buttons:1}));
+      // React may replace the trigger when it switches the selected panel.
+      if(!el.isConnected || !visible(el) || disabled(el))return;
+      el.dispatchEvent(new owner.MouseEvent('mouseup',{...event,buttons:0}));
+      if(!el.isConnected || !visible(el) || disabled(el))return;
+    }
     el.click();
   }
   function text(el) {
@@ -565,7 +576,7 @@
   function diagnostics(){
     const snapshot=inspect();
     const cleanUrl=value=>{try{const url=new URL(value,location.href);return url.origin+url.pathname+(url.hash.startsWith('#/')?url.hash.split('?')[0]:'');}catch{return '';}};
-    return {ok:true,diagnostics:{version:'0.4.0',page:{url:cleanUrl(location.href)},stage:snapshot.stage,subjects:snapshot.subjects,lessons:snapshot.lessons.map(({href,...lesson})=>({...lesson,href:href?cleanUrl(href):undefined})),navigation:snapshot.navigation,issues:snapshot.diagnostics,frames:[...document.querySelectorAll('iframe')].map(frame=>({url:cleanUrl(frame.src),sameOrigin:!!frame.contentDocument})),controls:all('button,[role="button"],[data-testid]').filter(node=>!node.closest('form')&&!node.matches('input,textarea')).slice(0,100).map(node=>({tag:node.tagName,role:node.getAttribute('role'),testId:node.getAttribute('data-testid'),classes:[...node.classList].slice(0,6),label:clean(node.getAttribute('aria-label')|| (node.matches('button,[role="button"]')?text(node):'')).slice(0,100)}))}};
+    return {ok:true,diagnostics:{version:'0.4.1',page:{url:cleanUrl(location.href)},stage:snapshot.stage,subjects:snapshot.subjects,lessons:snapshot.lessons.map(({href,...lesson})=>({...lesson,href:href?cleanUrl(href):undefined})),navigation:snapshot.navigation,issues:snapshot.diagnostics,frames:[...document.querySelectorAll('iframe')].map(frame=>({url:cleanUrl(frame.src),sameOrigin:!!frame.contentDocument})),controls:all('button,[role="button"],[data-testid]').filter(node=>!node.closest('form')&&!node.matches('input,textarea')).slice(0,100).map(node=>({tag:node.tagName,role:node.getAttribute('role'),testId:node.getAttribute('data-testid'),classes:[...node.classList].slice(0,6),label:clean(node.getAttribute('aria-label')|| (node.matches('button,[role="button"]')?text(node):'')).slice(0,100)}))}};
   }
   function handle(message){
     rootsCache=null;frameDiagnostics=[];settings(message.selectors);

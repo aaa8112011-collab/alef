@@ -10,7 +10,7 @@ const root = new URL('../',import.meta.url);
 // Explicit UI-only Chrome API stub. Native unpacked MV3 loading is blocked by
 // this cloud image's managed ExtensionInstallBlocklist; this harness does not
 // change that policy or claim to exercise Chrome's native permission prompt.
-async function dashboardHarness({connected=false,savedConfig=null}={}) {
+async function dashboardHarness({connected=false,savedConfig=null,savedToken,sessionToken='ui-test-pairing-token-not-a-real-secret',failTokenWrites=false}={}) {
   const resources = new Map(await Promise.all(['dashboard.html','dashboard.css','dashboard.js'].map(async name=>[name,await readFile(new URL(`extension/${name}`,root))])));
   const server=createServer((request,response)=>{
     const name=new URL(request.url,'http://127.0.0.1').pathname.slice(1);
@@ -23,20 +23,34 @@ async function dashboardHarness({connected=false,savedConfig=null}={}) {
   let browser;
   try {
     browser=await chromium.launch({headless:true,...(process.env.CHROMIUM_PATH||existsSync('/usr/bin/chromium')?{executablePath:process.env.CHROMIUM_PATH||'/usr/bin/chromium'}:{}),args:['--no-sandbox','--disable-dev-shm-usage']});
-    const page=await browser.newPage({locale:'ar-AE',viewport:{width:1440,height:1100}});
-    page.setDefaultTimeout(7000);
+    const context=await browser.newContext({locale:'ar-AE',viewport:{width:1440,height:1100}});
     const errors=[];
-    page.on('pageerror',error=>errors.push(error.message));
-    page.on('console',entry=>{if(entry.type()==='error'&&/content security policy|refused to/i.test(entry.text()))errors.push(entry.text());});
-    await page.addInitScript(({connected,savedConfig})=>{
+    const stores={local:{...(savedConfig?{alefConfig:savedConfig}:{}),...(savedToken===undefined?{}:{alefPairingToken:savedToken})},
+      session:sessionToken==null?{}:{alefPairingToken:sessionToken}};
+    await context.exposeFunction('__readUIStorage',(area,keys)=>{
+      const store=stores[area];const result={};
+      for(const key of Array.isArray(keys)?keys:[keys])if(Object.hasOwn(store,key))result[key]=store[key];
+      return structuredClone(result);
+    });
+    await context.exposeFunction('__writeUIStorage',(area,value)=>{
+      if(failTokenWrites&&area==='local'&&Object.hasOwn(value,'alefPairingToken'))throw new Error('Storage unavailable');
+      Object.assign(stores[area],structuredClone(value));
+    });
+    await context.exposeFunction('__removeUIStorage',(area,key)=>{delete stores[area][key];});
+    await context.addInitScript(({connected})=>{
       const state={running:false,status:'idle',page:connected?{title:'صفحة اختبار محلية — الرياضيات',url:'http://127.0.0.1/fixture'}:null,
         subjects:connected?[{id:'math',name:'الرياضيات'},{id:'science',name:'العلوم'},{id:'arabic',name:'اللغة العربية'}]:[],
         subjectId:null,stats:{solved:0,review:0,total:0},events:[],lastEvent:null};
       const listeners=[];
-      const local=savedConfig?{alefConfig:savedConfig}:{},session={alefPairingToken:'ui-test-pairing-token-not-a-real-secret'};
-      globalThis.__uiTest={state,local,session,messages:[],permissions:[],listeners,
+      const local={},session={};
+      globalThis.__uiTest={state,local,session,messages:[],permissions:[],listeners,storageAccess:[],
         emit(event){listeners.forEach(listener=>listener({type:'RUN_EVENT',tabId:1,event}));}};
-      const storage=store=>({async get(key){return {[key]:store[key]};},async set(value){Object.assign(store,value);}});
+      const storage=(area,store)=>({
+        async get(keys){const result=await __readUIStorage(area,keys);Object.assign(store,result);return result;},
+        async set(value){await __writeUIStorage(area,value);Object.assign(store,value);},
+        async remove(key){await __removeUIStorage(area,key);delete store[key];},
+        async setAccessLevel(value){__uiTest.storageAccess.push({area,...value});},
+      });
       globalThis.chrome={runtime:{id:'ui-test-extension',onMessage:{addListener(listener){listeners.push(listener);}},
         async sendMessage(message){
           globalThis.__uiTest.messages.push(structuredClone(message));
@@ -52,14 +66,23 @@ async function dashboardHarness({connected=false,savedConfig=null}={}) {
           }
           return {ok:true,page:state.page,subjects:state.subjects,state:structuredClone(state)};
         }},
-        storage:{local:storage(local),session:storage(session)},
+        storage:{local:storage('local',local),session:storage('session',session)},
         permissions:{async request(value){globalThis.__uiTest.permissions.push(value);return true;}},
         tabs:{async get(){return {id:1,url:'https://moe.alefed.com/'};},async query(){return [{id:1,url:'https://moe.alefed.com/'}];},async create(){return {id:1};}},
       };
-    },{connected,savedConfig});
-    await page.goto(`http://127.0.0.1:${server.address().port}/dashboard.html?tabId=1`);
-    await page.waitForFunction(()=>globalThis.__uiTest.listeners.length>0);
-    return {page,errors,async close(){await browser.close();await new Promise(resolve=>server.close(resolve));}};
+    },{connected});
+    const openPage=async()=>{
+      const page=await context.newPage();page.setDefaultTimeout(7000);
+      page.on('pageerror',error=>errors.push(error.message));
+      page.on('console',entry=>{if(entry.type()==='error'&&/content security policy|refused to/i.test(entry.text()))errors.push(entry.text());});
+      await page.goto(`http://127.0.0.1:${server.address().port}/dashboard.html?tabId=1`);
+      await page.waitForFunction(()=>globalThis.__uiTest.listeners.length>0);
+      return page;
+    };
+    const page=await openPage();
+    return {page,errors,stores,async reopen({clearSession=false}={}){
+      await this.page.close();if(clearSession)stores.session={};this.page=await openPage();return this.page;
+    },async close(){await browser.close();await new Promise(resolve=>server.close(resolve));}};
   }catch(error){await browser?.close();await new Promise(resolve=>server.close(resolve));throw error;}
 }
 
@@ -74,7 +97,7 @@ async function capture(page,name) {
   await page.screenshot({path:new URL(`docs/${name}.png`,root).pathname,fullPage:true});
 }
 
-test('Arabic dashboard renders under extension CSP and saves pairing token only in session storage',async()=>{
+test('Arabic dashboard renders under extension CSP and saves pairing token separately in trusted local storage',async()=>{
   const harness=await dashboardHarness();
   try{
     const {page}=harness;
@@ -105,8 +128,9 @@ test('Arabic dashboard renders under extension CSP and saves pairing token only 
     await page.locator('#settings-form button[type="submit"]').click();
     assert.equal(await page.locator('#settings-dialog').evaluate(el=>el.open),false);
     const stored=await page.evaluate(()=>({local:__uiTest.local,session:__uiTest.session}));
-    assert.equal(stored.session.alefPairingToken,'another-local-ui-test-token');
-    assert.equal(JSON.stringify(stored.local).includes('another-local-ui-test-token'),false);
+    assert.equal(stored.session.alefPairingToken,undefined);
+    assert.equal(stored.local.alefPairingToken,'another-local-ui-test-token');
+    assert.equal(JSON.stringify(stored.local.alefConfig).includes('another-local-ui-test-token'),false);
     assert.equal(stored.local.alefConfig.selectors.question,'[data-alef-question]');
     assert.deepEqual(harness.errors,[]);
   }finally{await harness.close();}
@@ -242,6 +266,70 @@ test('existing verified mode can be switched to fast mode and persists the new s
     await page.locator('#start').click();
     await page.waitForFunction(()=>__uiTest.local.alefConfig?.verify===false);
     assert.equal(await page.evaluate(()=>__uiTest.messages.find(message=>message.type==='START').config.verify),false);
+    assert.deepEqual(harness.errors,[]);
+  }finally{await harness.close();}
+});
+
+test('pasted pairing token saves without submitting and survives closing the dashboard with an empty new session',async()=>{
+  const harness=await dashboardHarness({sessionToken:null});
+  try{
+    let page=harness.page;
+    await page.locator('.settings-trigger').first().click();
+    await page.locator('#pairing-token').fill('persistent-ui-token-not-a-real-secret');
+    await page.waitForFunction(()=>document.querySelector('#pairing-save-status').textContent.includes('حُفظ رمز الربط'));
+    assert.equal(harness.stores.local.alefPairingToken,'persistent-ui-token-not-a-real-secret');
+    assert.ok((await page.locator('#settings-dialog').evaluate(el=>el.open)),'No Save or close click is needed to persist the pasted token');
+    assert.equal((await page.locator('body').innerText()).includes('persistent-ui-token-not-a-real-secret'),false);
+    assert.equal(await page.locator('#pairing-token').getAttribute('type'),'password');
+    assert.deepEqual(await page.evaluate(()=>__uiTest.storageAccess),[{area:'local',accessLevel:'TRUSTED_CONTEXTS'}]);
+    page=await harness.reopen({clearSession:true});
+    await page.locator('.settings-trigger').first().click();
+    assert.equal(await page.locator('#pairing-token').inputValue(),'persistent-ui-token-not-a-real-secret');
+    assert.equal(Object.hasOwn(harness.stores.local.alefConfig||{},'token'),false);
+    assert.deepEqual(harness.errors,[]);
+  }finally{await harness.close();}
+});
+
+test('legacy session pairing token migrates to local storage and survives a later browser session',async()=>{
+  const harness=await dashboardHarness({sessionToken:'legacy-ui-token-not-a-real-secret'});
+  try{
+    assert.equal(harness.stores.local.alefPairingToken,'legacy-ui-token-not-a-real-secret');
+    assert.equal(Object.hasOwn(harness.stores.session,'alefPairingToken'),false);
+    const page=await harness.reopen({clearSession:true});
+    await page.locator('.settings-trigger').first().click();
+    assert.equal(await page.locator('#pairing-token').inputValue(),'legacy-ui-token-not-a-real-secret');
+    assert.deepEqual(harness.errors,[]);
+  }finally{await harness.close();}
+});
+
+test('clearing a saved pairing token stays cleared after reopening even when an obsolete session token exists',async()=>{
+  const harness=await dashboardHarness({savedToken:'saved-ui-token-not-a-real-secret',sessionToken:'obsolete-ui-token-not-a-real-secret'});
+  try{
+    let page=harness.page;
+    await page.locator('.settings-trigger').first().click();
+    assert.equal(await page.locator('#pairing-token').inputValue(),'saved-ui-token-not-a-real-secret');
+    await page.locator('#pairing-token').fill('');
+    await page.waitForFunction(()=>document.querySelector('#pairing-save-status').textContent.includes('حُذف رمز الربط'));
+    assert.equal(harness.stores.local.alefPairingToken,'');
+    harness.stores.session.alefPairingToken='obsolete-ui-token-not-a-real-secret';
+    page=await harness.reopen();
+    await page.locator('.settings-trigger').first().click();
+    assert.equal(await page.locator('#pairing-token').inputValue(),'');
+    assert.equal(harness.stores.local.alefPairingToken,'');
+    assert.equal(Object.hasOwn(harness.stores.session,'alefPairingToken'),false);
+    assert.deepEqual(harness.errors,[]);
+  }finally{await harness.close();}
+});
+
+test('a pairing-token write failure is reported instead of claiming the token was saved',async()=>{
+  const harness=await dashboardHarness({savedToken:'original-ui-token-not-a-real-secret',sessionToken:null,failTokenWrites:true});
+  try{
+    const {page}=harness;
+    await page.locator('.settings-trigger').first().click();
+    await page.locator('#pairing-token').fill('replacement-ui-token-not-a-real-secret');
+    await page.waitForFunction(()=>document.querySelector('#pairing-save-status').textContent.includes('تعذّر حفظ'));
+    assert.equal(harness.stores.local.alefPairingToken,'original-ui-token-not-a-real-secret');
+    assert.equal((await page.locator('body').innerText()).includes('replacement-ui-token-not-a-real-secret'),false);
     assert.deepEqual(harness.errors,[]);
   }finally{await harness.close();}
 });

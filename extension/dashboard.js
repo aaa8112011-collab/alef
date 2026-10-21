@@ -13,6 +13,8 @@ let startedAt = null;
 let eventCount = 0;
 let lessonQueue = [];
 let lessonStats = {};
+let pairingSaveRevision = 0;
+let pendingPairingSave = Promise.resolve();
 const lessonStatuses = {pending:'بانتظار البدء',running:'جارٍ العمل',completed:'مكتمل',review:'يحتاج مراجعة',locked:'مقفل',alreadycompleted:'مكتمل سابقًا'};
 
 const statusNames = {idle:'بانتظار البدء',running:'جارٍ الحل',complete:'اكتملت الجلسة',review:'تحتاج مراجعتك',error:'تعذّر المتابعة',stopped:'متوقف',interrupted:'انقطعت الجلسة'};
@@ -235,6 +237,26 @@ function openSettings() {
   $('settings-error').hidden=true;
   if(!$('settings-dialog').open)$('settings-dialog').showModal();
 }
+function persistPairingToken(value) {
+  const token=String(value||'').trim();
+  config.token=token;
+  const revision=++pairingSaveRevision;
+  const status=$('pairing-save-status');
+  status.textContent='جارٍ حفظ رمز الربط على هذا الجهاز…';
+  // Send the write immediately on input, rather than waiting for a debounce or
+  // for the settings form: the extension page may be closed right after paste.
+  const operation=Promise.resolve(chrome.storage.local.set({alefPairingToken:token})).then(()=>{
+    if(revision===pairingSaveRevision)status.textContent=token
+      ? 'حُفظ رمز الربط تلقائيًا على هذا الجهاز، ويبقى بعد إغلاق المتصفح. امسح الحقل لحذفه.'
+      : 'حُذف رمز الربط المحفوظ. الصق رمزًا جديدًا للربط.';
+  }).catch(()=>{
+    const message='تعذّر حفظ رمز الربط. أعد المحاولة وانتظر ظهور تأكيد الحفظ.';
+    if(revision===pairingSaveRevision)status.textContent=message;
+    throw new Error(message);
+  });
+  pendingPairingSave=operation;
+  return operation;
+}
 async function saveSettings(event) {
   event.preventDefault();
   try {
@@ -244,13 +266,14 @@ async function saveSettings(event) {
     config.selectors=selectors;
     const {token,...persistent}=config;
     await chrome.storage.local.set({alefConfig:persistent});
-    await chrome.storage.session.set({alefPairingToken:token});
-    $('settings-dialog').close();notice('حُفظت الإعدادات. رمز الربط المحلي محفوظ لجلسة المتصفح الحالية فقط.');
+    await persistPairingToken(token);
+    $('settings-dialog').close();notice('حُفظت الإعدادات ورمز الربط على هذا الجهاز.');
   }catch(error){$('settings-error').hidden=false;$('settings-error').textContent=error.message;}
 }
 async function start() {
   try {
     notice('');
+    await pendingPairingSave;
     if(!config.token){openSettings();throw new Error('الصق رمز الربط المحلي في الإعدادات أولًا. ينسخه تشغيل START-WINDOWS.cmd إلى الحافظة.');}
     $('start').disabled=true;
     config.verify=$('verify').checked;config.autoSubmit=$('auto-submit').checked;
@@ -265,8 +288,14 @@ async function start() {
 }
 async function init() {
   if(typeof chrome==='undefined'||!chrome.runtime?.id){notice('هذه واجهة إضافة Chrome. ثبّت مجلد extension، ثم افتح مُعين من شريط الإضافات.',true);return;}
-  const [local,session]=await Promise.all([chrome.storage.local.get('alefConfig'),chrome.storage.session.get('alefPairingToken')]);
-  config={...config,...local.alefConfig,token:session.alefPairingToken||''};
+  await chrome.storage.local.setAccessLevel?.({accessLevel:'TRUSTED_CONTEXTS'});
+  const [local,session]=await Promise.all([chrome.storage.local.get(['alefConfig','alefPairingToken']),chrome.storage.session.get('alefPairingToken')]);
+  const hasSavedToken=Object.hasOwn(local,'alefPairingToken');
+  config={...config,...local.alefConfig,token:hasSavedToken
+    ? typeof local.alefPairingToken==='string'?local.alefPairingToken.trim():''
+    : typeof session.alefPairingToken==='string'?session.alefPairingToken.trim():''};
+  if(!hasSavedToken&&Object.hasOwn(session,'alefPairingToken'))await persistPairingToken(config.token);
+  await chrome.storage.session.remove?.('alefPairingToken');
   $('verify').checked=config.verify===true;$('auto-submit').checked=config.autoSubmit!==false;
   updateSolveMode();
   $('skip-instruction').checked=config.skipInstruction!==false;
@@ -281,6 +310,12 @@ async function init() {
   document.querySelectorAll('.settings-trigger').forEach(button=>button.addEventListener('click',openSettings));
   $('close-settings').addEventListener('click',()=>$('settings-dialog').close());
   $('settings-form').addEventListener('submit',saveSettings);$('check-server').addEventListener('click',checkServer);
+  const saveTokenInput=()=>{void persistPairingToken($('pairing-token').value).catch(()=>{});};
+  $('pairing-token').addEventListener('input',saveTokenInput);
+  $('pairing-token').addEventListener('change',saveTokenInput);
+  window.addEventListener('pagehide',()=>{
+    if($('settings-dialog').open&&$('pairing-token').value.trim()!==config.token)saveTokenInput();
+  });
   setInterval(()=>{
     if(!startedAt || !running)return;
     const elapsed=Math.floor((Date.now()-startedAt)/1000);

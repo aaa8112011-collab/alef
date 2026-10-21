@@ -82,6 +82,45 @@ async function runCourse(h,fetchImpl=provider){
 }
 const complete=worker=>worker.events.some(item=>item.event?.kind==='complete');
 
+test('Radix-style coursework tabs activate from one primary pointer interaction rather than click alone',async t=>{
+  const h=await harness(t,'radix-tabs','classic');
+  await h.send({type:'ALEF_SCAN'});await h.send({type:'ALEF_SELECT_SUBJECT',subjectId:'math'});
+  const selector='[data-testid="core-coursework-assigned-tab-select"]';
+  await h.page.locator(selector).evaluate(node=>node.click());
+  assert.match(h.page.url(),/tab=forYou$/,'A bare programmatic click must reproduce the original failure');
+  await h.page.locator(selector).evaluate(node=>node.dispatchEvent(new MouseEvent('mousedown',{bubbles:true,button:2})));
+  await h.page.locator(selector).evaluate(node=>node.dispatchEvent(new MouseEvent('mousedown',{bubbles:true,button:0,ctrlKey:true})));
+  assert.match(h.page.url(),/tab=forYou$/,'Right-click and Ctrl+click must not select the tab');
+  const snapshot=await h.send({type:'ALEF_INSPECT'});
+  const action=snapshot.navigation.find(item=>item.kind==='catalog'&&item.catalogTab==='assigned');
+  assert.ok(action,'The inactive Assigned trigger must be discovered');
+  const result=await h.send({type:'ALEF_NAVIGATE',actionId:action.id,fingerprint:snapshot.fingerprint});
+  assert.equal(result.ok,true,JSON.stringify(result));
+  assert.match(h.page.url(),/tab=assigned$/,'The adapter must perform the actual tab activation interaction');
+  const actual=await h.page.evaluate(()=>window.classicFixture.state);
+  assert.deepEqual(actual.actions.filter(item=>item.kind==='tab'),[{kind:'tab',tab:'assigned'}],'Exactly one tab activation is allowed');
+  assert.equal(actual.tabEvents.filter(item=>item.type==='mousedown'&&item.button===0&&!item.ctrlKey).length,1);
+  assert.deepEqual(actual.tabEvents.slice(-3).map(item=>item.type),['mousedown','mouseup','click'],'The connected trigger receives one complete primary mouse interaction');
+  const selected=await h.send({type:'ALEF_INSPECT'});
+  assert.equal(selected.navigation.some(item=>item.kind==='catalog'&&item.catalogTab==='assigned'),false,'The selected tab must not be clicked again');
+  await h.page.locator('[data-testid="core-coursework-alllessons-tab-select"]').evaluate(node=>{node.disabled=true;});
+  const disabled=await h.send({type:'ALEF_INSPECT'});
+  assert.equal(disabled.navigation.some(item=>item.kind==='catalog'&&item.catalogTab==='alllessons'),false,'Disabled tabs must remain unavailable');
+});
+
+test('course workflow completes the primary-mousedown tab catalog and keeps ordinary lesson clicks single',async t=>{
+  const h=await harness(t,'radix-tabs','classic');
+  const worker=await runCourse(h);
+  await waitFor(()=>complete(worker),()=>JSON.stringify(worker.events));
+  const actual=await h.page.evaluate(()=>window.classicFixture.state);
+  assert.deepEqual(actual.completed,['polynomials','dilations','arabic']);
+  assert.deepEqual(actual.actions.filter(item=>item.kind==='lesson').map(item=>[item.id,item.target]),[
+    ['polynomials','button'],['dilations','button'],['arabic','button'],
+  ]);
+  assert.equal(actual.submissions.length,3);
+  assert.equal(actual.actions.filter(item=>item.kind==='filter'&&item.filter==='all').length,1);
+});
+
 test('course catalog discovers lessons with explicit locked and previously-completed status',async t=>{
   const h=await harness(t);
   const scan=await h.send({type:'ALEF_SCAN'});
@@ -259,6 +298,8 @@ for(const scenario of ['normal','empty-home']){
     assert.ok(actual.actions.some(item=>item.kind==='tab'&&item.tab==='assigned'));
     assert.ok(actual.actions.some(item=>item.kind==='filter'&&item.filter==='all'),'ALL must include overdue tasks that TODO omits');
     assert.ok(actual.actions.filter(item=>item.kind==='expand'&&item.tab==='assigned').length>=2);
+    assert.ok(actual.actions.findIndex(item=>item.kind==='lesson')<actual.actions.findIndex(item=>item.kind==='expand'),
+      'The first available lesson must start before loading the remaining pages');
     assert.equal(actual.actions.filter(item=>item.kind==='instruction').length,9);
     assert.equal(actual.actions.filter(item=>item.kind==='instruction'&&item.label==='سأحاول لاحقًا').length,3);
     assert.equal(state.stats.lessonsCompleted,3);assert.equal(state.stats.lessonsTotal,3);

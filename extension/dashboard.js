@@ -13,6 +13,8 @@ let startedAt = null;
 let eventCount = 0;
 let lessonQueue = [];
 let lessonStats = {};
+let answerLessonKey = null;
+let displayedQuestion = null;
 let pairingSaveRevision = 0;
 let pendingPairingSave = Promise.resolve();
 const lessonStatuses = {pending:'بانتظار البدء',running:'جارٍ العمل',completed:'مكتمل',review:'يحتاج مراجعة',locked:'مقفل',alreadycompleted:'مكتمل سابقًا'};
@@ -103,35 +105,84 @@ function renderLessonQueue(queue, stats, currentLesson) {
   const total=lessonStats.lessonsTotal??lessonQueue.filter(lesson=>!['locked','alreadycompleted'].includes(lesson.status)).length;
   const completed=lessonStats.lessonsCompleted??lessonQueue.filter(lesson=>lesson.status==='completed').length;
   const reviews=lessonStats.lessonsReview??lessonQueue.filter(lesson=>lesson.status==='review').length;
-  $('lesson-count').textContent=`${completed} / ${total}`;
-  const progress=total?Math.min(100,Math.round((completed+reviews)*100/total)):0;
+  $('lesson-count').textContent=`اكتمل ${completed} من ${total}`;
+  const progress=total?Math.min(100,Math.round(completed*100/total)):0;
   $('lesson-progress-fill').style.width=`${progress}%`;
   document.querySelector('.course-progress-track').setAttribute('aria-valuenow',String(progress));
+  document.querySelector('.course-progress-track').setAttribute('aria-valuetext',`اكتمل ${completed} من ${total} درس؛ ${reviews} يحتاج مراجعة`);
   const active=typeof currentLesson==='string'?currentLesson:currentLesson?.name;
   $('current-lesson').textContent=active?`الدرس الحالي: ${active}`:`أُكمل ${completed} درس · ${reviews} يحتاج مراجعة`;
 }
+function clearAnswer({resetLesson=false}={}) {
+  displayedQuestion=null;
+  if(resetLesson) {
+    answerLessonKey=null;
+    $('answer-subject').textContent='';$('answer-lesson').textContent='';
+    $('answer-context').hidden=true;
+  }
+  $('answer-empty').hidden=false;$('answer-content').hidden=true;
+  $('question-text').textContent='';$('answer-box').hidden=true;
+  $('answer-text').textContent='';$('explanation').textContent='';$('confidence').textContent='';
+  $('answer-state').textContent='';$('answer-state').dataset.state='';
+  $('question-label').textContent='السؤال الحالي';
+  $('answer-label').textContent='الإجابة المقترحة';
+}
 function showAnswer(event) {
-  if (!event.question && !event.answer) return;
-  $('answer-empty').hidden = true;
-  $('answer-content').hidden = false;
-  if (event.question) $('question-text').textContent = event.question.text;
-  if (event.kind === 'question') $('answer-box').hidden = true;
+  const lesson=typeof event.currentLesson==='string'?{name:event.currentLesson}:event.currentLesson;
+  const lessonKey=lesson&&(lesson.id||lesson.name);
+  if(lessonKey&&lessonKey!==answerLessonKey) {
+    clearAnswer();answerLessonKey=lessonKey;
+  }
+  const subject=event.currentSubject?.name||subjects.find(item=>item.id===selectedSubject)?.name;
+  if(subject)$('answer-subject').textContent=subject;
+  if(lesson?.name)$('answer-lesson').textContent=lesson.name;
+  $('answer-context').hidden=!$('answer-subject').textContent&&!$('answer-lesson').textContent;
+  if(event.question) {
+    const changed=displayedQuestion&&(event.question.id!==displayedQuestion.id||event.question.fingerprint!==displayedQuestion.fingerprint||event.question.text!==displayedQuestion.text);
+    if(event.kind==='question'||changed)clearAnswer();
+    displayedQuestion=event.question;
+    $('question-text').textContent=event.question.text;
+    $('answer-empty').hidden=true;$('answer-content').hidden=false;
+  }
+  if(event.kind==='question') {
+    $('answer-state').textContent='جارٍ حل هذا السؤال…';$('answer-state').dataset.state='working';
+  }
   if (event.answer) {
+    $('answer-empty').hidden=true;$('answer-content').hidden=false;
     $('answer-box').hidden = false;
-    const selected = event.question?.options?.filter(option=>event.answer.optionIds?.includes(option.id)).map(option=>option.text) || [];
-    const pairs=event.answer.matches?.map(pair=>`${event.question?.items?.find(item=>item.id===pair.itemId)?.text||pair.itemId} ← ${event.question?.targets?.find(item=>item.id===pair.targetId)?.text||pair.targetId}`)||[];
+    const question=event.question||displayedQuestion;
+    const selected = question?.options?.filter(option=>event.answer.optionIds?.includes(option.id)).map(option=>option.text) || [];
+    const pairs=event.answer.matches?.map(pair=>`${question?.items?.find(item=>item.id===pair.itemId)?.text||pair.itemId} ← ${question?.targets?.find(item=>item.id===pair.targetId)?.text||pair.targetId}`)||[];
     $('answer-text').textContent = pairs.length?pairs.join('\n'):selected.length ? selected.join('، ') : (event.answer.text || 'لا توجد إجابة قابلة للتطبيق');
     $('explanation').textContent = event.answer.explanation || '';
     const confidence = Number(event.answer.confidence);
     $('confidence').textContent = Number.isFinite(confidence) ? `تقدير ثقة النموذج: ${Math.round(confidence*100)}٪` : '';
+    $('answer-state').textContent='وصلت الإجابة؛ جارٍ تطبيقها على السؤال في ألف…';$('answer-state').dataset.state='working';
+  }
+  if(event.kind==='submitted'&&event.submitted===true) {
+    $('answer-label').textContent='الإجابة المُرسلة';
+    $('answer-state').textContent='أُرسلت الإجابة إلى ألف؛ جارٍ انتظار النتيجة أو السؤال التالي.';
+    $('answer-state').dataset.state='submitted';
+  } else if(['review','error'].includes(event.kind)&&event.blocking!==false) {
+    $('answer-state').textContent=event.applied===true
+      ? 'تم اختيار الإجابة، لكن لم يُؤكَّد إرسالها. توقف التشغيل في هذا الدرس.'
+      : 'توقف التشغيل في هذا الدرس. راجع سبب التوقف في سجل النشاط.';
+    $('answer-state').dataset.state='review';
+  } else if(event.kind==='complete') {
+    if(displayedQuestion)$('question-label').textContent='آخر سؤال في الجلسة';
+    $('answer-state').textContent='اكتملت الجلسة. يمكنك مراجعة الإجابات وخطوات التنفيذ في سجل النشاط.';
+    $('answer-state').dataset.state='complete';
+  } else if(event.kind==='stopped') {
+    $('answer-state').textContent='التشغيل متوقف.';$('answer-state').dataset.state='stopped';
   }
 }
 function appendEvent(event) {
   const log = $('event-log');
   log.querySelector('.log-placeholder')?.remove();
   const row = document.createElement('li');
-  const icon = document.createElement('span');icon.className=`event-icon ${['error','review'].includes(event.kind)?event.kind:''}`;icon.textContent={complete:'✓',error:'!',review:'◈',stopped:'Ⅱ',question:'?',answer:'✧'}[event.kind] || '·';icon.setAttribute('aria-hidden','true');
-  const label = document.createElement('span');label.className='event-message';label.textContent=reviewReasons[event.message] || event.message;
+  const icon = document.createElement('span');icon.className=`event-icon ${['error','review'].includes(event.kind)?event.kind:''}`;icon.textContent={complete:'✓',error:'!',review:'◈',stopped:'Ⅱ',question:'?',answer:'✧',submitted:'✓'}[event.kind] || '·';icon.setAttribute('aria-hidden','true');
+  const label = document.createElement('span');label.className='event-message';
+  label.textContent=(event.currentLesson?.name?`${event.currentLesson.name} — `:'')+(reviewReasons[event.message] || event.message);
   const time = document.createElement('time');time.className='event-time';time.textContent=new Date(event.timestamp || Date.now()).toLocaleTimeString('ar-AE',{hour:'2-digit',minute:'2-digit'});
   row.append(icon,label,time);log.prepend(row);
   while(log.children.length>100) log.lastChild.remove();
@@ -155,6 +206,7 @@ function applyEvent(event, log = true) {
 }
 function restoreState(state) {
   if (!state) return;
+  clearAnswer({resetLesson:true});
   connected=Boolean(state.page);running=Boolean(state.running);
   if (state.subjectId) selectedSubject=state.subjectId;
   renderSubjects(state.subjects);
@@ -165,6 +217,7 @@ function restoreState(state) {
   renderLessonQueue(state.queue,state.stats,state.currentLesson);
   const events=state.events || [];
   if(events.length) {$('event-log').replaceChildren();eventCount=0;events.forEach(event=>{appendEvent(event);showAnswer(event);});startedAt=events[0].timestamp;}
+  showAnswer({currentLesson:state.currentLesson,currentSubject:state.subjects?.find(item=>item.id===state.subjectId)});
   setBadge(running?'جارٍ الحل':connected?'متصل':'غير متصل',running?'running':connected?'success':'neutral');
   updateButtons();
 }

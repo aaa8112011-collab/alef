@@ -211,9 +211,104 @@ test('course queue and nonblocking lesson review retain automatic run controls',
  try{
   const {page}=harness;await page.locator('#subjects button').first().click();await page.locator('#start').click();
   await page.evaluate(()=>__uiTest.emit({kind:'queue',message:'فحص الدروس',stats:{solved:0,review:0,total:0,lessonsTotal:2,lessonsCompleted:0,lessonsReview:0},queue:[{id:'one',name:'القراءة',status:'running'},{id:'two',name:'القواعد',status:'pending'},{id:'locked',name:'درس مقفل',status:'locked'}],currentLesson:{name:'القراءة'},timestamp:Date.now()}));
-  assert.equal(await page.locator('#course-progress').isVisible(),true);assert.equal(await page.locator('#lesson-queue li').count(),3);assert.equal(await page.locator('#lesson-count').textContent(),'0 / 2');await capture(page,'dashboard-course');
+  assert.equal(await page.locator('#course-progress').isVisible(),true);assert.equal(await page.locator('#lesson-queue li').count(),3);assert.equal(await page.locator('#lesson-count').textContent(),'اكتمل 0 من 2');await capture(page,'dashboard-course');
   await page.evaluate(()=>__uiTest.emit({kind:'review',blocking:false,message:'درس يحتاج مراجعة؛ متابعة التالي',stats:{solved:0,review:1,total:1,lessonsTotal:2,lessonsCompleted:0,lessonsReview:1},queue:[{id:'one',name:'القراءة',status:'review'},{id:'two',name:'القواعد',status:'running'}],timestamp:Date.now()}));
+  assert.equal(await page.locator('.course-progress-track').getAttribute('aria-valuenow'),'0');
+  assert.equal(await page.locator('#lesson-count').textContent(),'اكتمل 0 من 2');
   assert.equal(await page.locator('#stop').isEnabled(),true);assert.equal(await page.locator('#start').isDisabled(),true);assert.equal(await page.locator('#skip-instruction').isDisabled(),true);
+  assert.deepEqual(harness.errors,[]);
+ }finally{await harness.close();}
+});
+
+test('answers identify their subject and lesson, distinguish submission, and clear on a new question or lesson',async()=>{
+ const harness=await dashboardHarness({connected:true});
+ try{
+  const {page}=harness;await page.locator('#subjects button').first().click();await page.locator('#start').click();
+  await page.evaluate(()=>{
+   const lesson={id:'polynomials',name:'Adding Polynomials'};
+   const question={id:'q1',fingerprint:'first',text:'Select the correct answer.',options:[{id:'a',text:'3c² + 2c − 1'}]};
+   __uiTest.emit({kind:'lesson',message:'بدء درس',currentLesson:lesson,currentSubject:{id:'math',name:'الرياضيات'}});
+   __uiTest.emit({kind:'question',message:'جارٍ الحل',currentLesson:lesson,question});
+   __uiTest.emit({kind:'answer',message:'وصلت الإجابة',currentLesson:lesson,question,answer:{optionIds:['a'],explanation:'نجمع الحدود المتشابهة.',confidence:.95}});
+  });
+  assert.equal(await page.locator('#answer-subject').textContent(),'الرياضيات');
+  assert.equal(await page.locator('#answer-lesson').textContent(),'Adding Polynomials');
+  assert.equal(await page.locator('#answer-text').textContent(),'3c² + 2c − 1');
+  assert.equal(await page.locator('#answer-label').textContent(),'الإجابة المقترحة');
+  assert.ok((await page.locator('#answer-state').textContent()).includes('جارٍ تطبيقها'));
+  await page.evaluate(()=>__uiTest.emit({kind:'submitted',message:'أُرسلت الإجابة',currentLesson:{id:'polynomials',name:'Adding Polynomials'},applied:true,submitted:true}));
+  assert.equal(await page.locator('#answer-label').textContent(),'الإجابة المُرسلة');
+  assert.ok((await page.locator('#answer-state').textContent()).includes('أُرسلت الإجابة إلى ألف'));
+  assert.ok((await page.locator('#event-log').textContent()).includes('Adding Polynomials — أُرسلت الإجابة'));
+  await page.evaluate(()=>__uiTest.emit({kind:'question',message:'السؤال التالي',currentLesson:{id:'polynomials',name:'Adding Polynomials'},question:{id:'q2',fingerprint:'second',text:'What is 2 + 2?',options:[]}}));
+  assert.equal(await page.locator('#question-text').textContent(),'What is 2 + 2?');
+  assert.equal(await page.locator('#answer-box').isVisible(),false);
+  assert.equal(await page.locator('#answer-text').textContent(),'');
+  assert.equal(await page.locator('#explanation').textContent(),'');
+  assert.ok((await page.locator('#answer-state').textContent()).includes('جارٍ حل هذا السؤال'));
+  await page.evaluate(()=>__uiTest.emit({kind:'lesson',message:'بدء درس جديد',currentLesson:{id:'dilations',name:'Dilations - Exit Ticket'}}));
+  assert.equal(await page.locator('#answer-lesson').textContent(),'Dilations - Exit Ticket');
+  assert.equal(await page.locator('#question-text').textContent(),'');
+  assert.equal(await page.locator('#answer-content').isVisible(),false);
+  assert.equal(await page.locator('#answer-empty').isVisible(),true);
+  assert.deepEqual(harness.errors,[]);
+ }finally{await harness.close();}
+});
+
+test('blocking review keeps lesson context and leaves later lessons pending without showing review as completion',async()=>{
+ const harness=await dashboardHarness({connected:true});
+ try{
+  const {page}=harness;await page.locator('#subjects button').first().click();await page.locator('#start').click();
+  await page.evaluate(()=>__uiTest.emit({kind:'review',blocking:true,message:'لم يستجب خيار الإجابة.',currentSubject:{id:'math',name:'الرياضيات'},currentLesson:{id:'one',name:'الدرس الأول'},
+   question:{id:'q1',text:'Select the correct answer.',options:[{id:'a',text:'42'}]},answer:{optionIds:['a'],confidence:.95},
+   stats:{solved:0,review:1,total:1,lessonsTotal:2,lessonsCompleted:0,lessonsReview:1},queue:[{id:'one',name:'الدرس الأول',status:'review'},{id:'two',name:'الدرس الثاني',status:'pending'}]}));
+  assert.equal(await page.locator('#answer-lesson').textContent(),'الدرس الأول');
+  assert.ok((await page.locator('#answer-state').textContent()).includes('توقف التشغيل في هذا الدرس'));
+  assert.equal(await page.locator('#answer-label').textContent(),'الإجابة المقترحة');
+  assert.equal(await page.locator('#solved-count').textContent(),'0');
+  assert.equal(await page.locator('#lesson-count').textContent(),'اكتمل 0 من 2');
+  assert.equal(await page.locator('.course-progress-track').getAttribute('aria-valuenow'),'0');
+  assert.ok((await page.locator('#lesson-queue .lesson-pending').textContent()).includes('الدرس الثاني'));
+  assert.equal(await page.locator('#stop').isEnabled(),false);
+  assert.equal(await page.locator('#start').isEnabled(),true);
+  assert.deepEqual(harness.errors,[]);
+ }finally{await harness.close();}
+});
+
+test('session completion replaces waiting-for-next status and restores the final answer as the last question',async()=>{
+ const harness=await dashboardHarness({connected:true});
+ try{
+  const {page}=harness;await page.locator('#subjects button').first().click();await page.locator('#start').click();
+  await page.evaluate(()=>{
+   const lesson={id:'final',name:'الدرس الأخير',status:'completed'};
+   const context={currentLesson:lesson,currentSubject:{id:'math',name:'الرياضيات'}};
+   const question={id:'last',fingerprint:'last',text:'ما ناتج 6 × 7؟',options:[{id:'b',text:'42'}]};
+   const answer={optionIds:['b'],text:'',confidence:.97};
+   const events=[
+    {kind:'lesson',message:'بدء الدرس',...context},
+    {kind:'question',message:'جارٍ الحل',...context,question},
+    {kind:'answer',message:'وصلت الإجابة',...context,question,answer},
+    {kind:'submitted',message:'أُرسلت الإجابة',...context,question,answer,applied:true,submitted:true},
+    {kind:'complete',message:'اكتملت الدروس المفتوحة.',stats:{solved:1,review:0,total:1,lessonsCompleted:1,lessonsTotal:1,lessonsReview:0}},
+   ];
+   events.forEach(event=>__uiTest.emit(event));
+   Object.assign(__uiTest.state,{running:false,status:'complete',subjectId:'math',currentLesson:null,events,stats:events.at(-1).stats,queue:[lesson]});
+  });
+  assert.equal(await page.locator('#question-label').textContent(),'آخر سؤال في الجلسة');
+  assert.ok((await page.locator('#answer-state').textContent()).includes('اكتملت الجلسة'));
+  assert.equal((await page.locator('#answer-state').textContent()).includes('انتظار'),false);
+  assert.equal(await page.locator('#answer-label').textContent(),'الإجابة المُرسلة');
+  assert.equal(await page.locator('#answer-text').textContent(),'42');
+  await page.evaluate(()=>restoreState(__uiTest.state));
+  assert.equal(await page.locator('#question-label').textContent(),'آخر سؤال في الجلسة');
+  assert.equal(await page.locator('#answer-lesson').textContent(),'الدرس الأخير');
+  assert.equal(await page.locator('#answer-subject').textContent(),'الرياضيات');
+  assert.ok((await page.locator('#answer-state').textContent()).includes('اكتملت الجلسة'));
+  assert.equal((await page.locator('#answer-state').textContent()).includes('انتظار'),false);
+  assert.equal(await page.locator('#answer-text').textContent(),'42');
+  assert.equal(await page.locator('#solved-count').textContent(),'1');
+  assert.equal(await page.locator('#lesson-count').textContent(),'اكتمل 1 من 1');
+  assert.equal(await page.locator('#stop').isEnabled(),false);
   assert.deepEqual(harness.errors,[]);
  }finally{await harness.close();}
 });

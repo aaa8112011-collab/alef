@@ -24,8 +24,8 @@ async function harness(t,scenario='normal',fixtureName='course'){
       window.__sendContent=message=>new Promise((resolve,reject)=>{
         for(const listener of window.__contentListeners){
           let answered=false;
-          listener(message,{id:'course-test-extension'},value=>{answered=true;resolve(value);});
-          if(answered)return;
+          const accepted=listener(message,{id:'course-test-extension'},value=>{answered=true;resolve(value);});
+          if(answered||accepted===true)return;
         }
         reject(new Error('No content handler for '+message.type));
       });
@@ -148,31 +148,39 @@ test('automatic course workflow skips available introductions and completes all 
   assert.equal(state.queue.find(item=>item.id==='lesson-done').status,'alreadycompleted');
 });
 
-test('one uncertain lesson is held for review while later lessons continue without a wrong submission',async t=>{
+test('one uncertain lesson stops in place and keeps all later lessons pending without a wrong submission',async t=>{
   const h=await harness(t);
   const worker=await runCourse(h,(url,options)=>{
     const question=JSON.parse(options.body).question;
     if(question.id.startsWith('lesson-2'))return Promise.resolve(Response.json({answer:{optionIds:['a'],text:'36',explanation:'نتيجة اختبار منخفضة الثقة',confidence:.4},verified:false,needsReview:true,reason:'low_confidence'}));
     return provider(url,options);
   });
-  await waitFor(()=>complete(worker),()=>JSON.stringify(worker.events));
+  await waitFor(()=>worker.events.some(item=>item.event?.kind==='review'&&item.event.blocking),()=>JSON.stringify(worker.events));
   const state=(await worker.send({type:'GET_STATE'})).state;
   const actual=await h.page.evaluate(()=>window.courseFixture.state);
-  assert.deepEqual(actual.completed,['lesson-1','lesson-3']);
+  assert.deepEqual(actual.completed,['lesson-1']);
   assert.equal(actual.submissions.some(item=>item.lesson==='lesson-2'),false);
   assert.equal(state.queue.find(item=>item.id==='lesson-2').status,'review');
-  assert.equal(state.stats.lessonsCompleted,2);assert.equal(state.stats.lessonsReview,1);
-  assert.ok(worker.events.some(item=>item.event?.kind==='review'&&item.event.blocking===false));
+  assert.equal(state.queue.find(item=>item.id==='lesson-3').status,'pending');
+  assert.equal(state.currentLesson.id,'lesson-2');assert.equal(state.running,false);
+  assert.equal(state.stats.lessonsCompleted,1);assert.equal(state.stats.lessonsReview,1);
+  assert.equal(complete(worker),false,'An unresolved course must not be announced as complete');
+  assert.deepEqual(actual.actions.filter(item=>item.kind==='lesson').map(item=>item.id),['lesson-1','lesson-2']);
 });
 
-test('mandatory introduction without an enabled skip is reviewed while unlocked later lessons continue',async t=>{
+test('mandatory introduction without an enabled next or skip stops without opening any later lesson',async t=>{
   const h=await harness(t,'mandatory');const worker=await runCourse(h);
-  await waitFor(()=>complete(worker),()=>JSON.stringify(worker.events));
+  await waitFor(()=>worker.events.some(item=>item.event?.kind==='review'&&item.event.blocking),()=>JSON.stringify(worker.events));
   const actual=await h.page.evaluate(()=>window.courseFixture.state);
   const state=(await worker.send({type:'GET_STATE'})).state;
   assert.equal(actual.actions.some(item=>item.kind==='instruction'&&item.lesson==='lesson-1'),false,'Disabled controls and mandatory progress must not be bypassed');
-  assert.deepEqual(actual.completed,['lesson-2','lesson-3']);
+  assert.deepEqual(actual.completed,[]);
   assert.equal(state.queue.find(item=>item.id==='lesson-1').status,'review');
+  assert.equal(state.queue.find(item=>item.id==='lesson-2').status,'pending');
+  assert.equal(state.queue.find(item=>item.id==='lesson-3').status,'pending');
+  assert.equal(state.currentLesson.id,'lesson-1');assert.equal(state.running,false);
+  assert.equal(complete(worker),false);
+  assert.deepEqual(actual.actions.filter(item=>item.kind==='lesson').map(item=>item.id),['lesson-1']);
 });
 
 test('STOP during a pending answer prevents submission and automatic opening of another lesson',async t=>{
@@ -349,7 +357,7 @@ test('generic Start and Continue outside a recognized hash-route lesson are neve
   assert.deepEqual((await h.page.evaluate(()=>window.classicFixture.state)).actions,[]);
 });
 
-test('classic NCLE workflow skips only accessible teaching sections and finishes after component results',async t=>{
+test('classic NCLE workflow follows normal next controls and finishes after component results',async t=>{
   const h=await harness(t,'ncle','classic');
   const worker=await runCourse(h);
   await waitFor(()=>complete(worker),()=>JSON.stringify(worker.events));
@@ -359,7 +367,7 @@ test('classic NCLE workflow skips only accessible teaching sections and finishes
   assert.equal(actual.actions.filter(item=>item.kind==='sectionResult').length,3);
   assert.equal(actual.actions.filter(item=>item.kind==='finish').length,3,'An assessment section result must not prematurely finish its lesson');
   assert.deepEqual(actual.actions.filter(item=>item.kind==='instruction').map(item=>item.step),[
-    'component','confirmSkip','component','confirmSkip','component','confirmSkip',
+    'nextComponent','confirmSkip','nextComponent','confirmSkip','nextComponent','confirmSkip',
   ]);
   assert.equal(actual.actions.some(item=>item.kind==='unexpected'),false,'Current, locked and already selected assessment components must remain untouched');
   assert.equal((await worker.send({type:'GET_STATE'})).state.stats.lessonsCompleted,3);
@@ -373,9 +381,7 @@ test('NCLE navigation recognizes named component next, div skip confirmation and
   });
   let snapshot=await h.send({type:'ALEF_SCAN'});
   assert.equal(snapshot.stage,'instruction');
-  assert.equal(snapshot.navigation.filter(item=>item.kind==='assessment').length,1);
-  assert.equal(snapshot.navigation.find(item=>item.kind==='assessment')?.label,'Check My Understanding');
-  assert.equal(snapshot.navigation.some(item=>item.kind==='assessment'&&item.label==='Exit Ticket'),false);
+  assert.equal(snapshot.navigation.filter(item=>item.kind==='assessment').length,0,'Sidebar components must not shortcut the sequential lesson flow');
   assert.equal(snapshot.navigation.find(item=>item.id==='activity-navigation-bar__next-button')?.kind,'next');
   assert.equal(snapshot.navigation.find(item=>item.id==='skip-content-modal-leave-button')?.kind,'skip');
   await h.page.evaluate(()=>{
@@ -398,15 +404,15 @@ test('final regression: expired login on a stale classic class route exposes no 
   assert.ok(snapshot.diagnostics.some(item=>item.includes('تسجيل الدخول')));
 });
 
-test('final regression: a Learn teaching question skips only to an available assessment and never overrides Arabic current or locked states',async t=>{
+test('final regression: a Learn teaching question is solved in place without selecting any Arabic assessment sidebar shortcut',async t=>{
   const h=await harness(t);
   await h.page.evaluate(()=>{
     history.replaceState(null,'','#/progress/ncle/class/test-class/activity/test-activity');
     document.querySelector('main').innerHTML='<section data-testid="ncle-activity-page"><nav data-testid="ncle-main-contents"><button id="learn" data-testid="ncle-component-item" aria-current="step" class="text-primary-100"><span dir="ltr">Learn</span></button><button id="locked" data-testid="ncle-component-item" class="text-primary-60"><span dir="ltr">اختبر فهمك</span></button><button id="available" data-testid="ncle-component-item" class="text-primary-100"><span dir="ltr">تحقق من فهمك</span></button></nav><article data-testid="ncle-activity-page-player"><section data-alef-question="teaching-question"><h2>ما ناتج 6 × 7؟</h2><label data-alef-option="a"><input type="radio" name="q">36</label><label data-alef-option="b"><input type="radio" name="q">42</label><button>إرسال الإجابة</button></section></article></section>';
   });
   let snapshot=await h.send({type:'ALEF_SCAN'});
-  assert.equal(snapshot.stage,'instruction','A supported teaching question must not block the available skip to the main assessment');
-  assert.deepEqual(snapshot.navigation.filter(item=>item.kind==='assessment').map(item=>item.id),['available']);
+  assert.equal(snapshot.stage,'question','A supported teaching question must be solved instead of leaving its unfinished section');
+  assert.deepEqual(snapshot.navigation.filter(item=>item.kind==='assessment').map(item=>item.id),[]);
   await h.page.evaluate(()=>{
     document.querySelector('#learn').removeAttribute('aria-current');document.querySelector('#available').setAttribute('aria-current','step');
   });

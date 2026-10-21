@@ -58,6 +58,8 @@ async function emit(tabId,kind,message,details={}) {
   const state = await getState(tabId);
   const event = {kind,message,...details,stats:{...state.stats},timestamp:Date.now()};
   if (state.currentLesson) event.currentLesson = {...state.currentLesson};
+  const subject = state.subjects.find(item=>item.id===state.subjectId);
+  if (subject) event.currentSubject = {id:subject.id,name:subject.name};
   if (['queue','lesson','complete','review','error','stopped'].includes(kind)) {
     event.queue = state.queue.map(item=>({...item}));
   }
@@ -241,7 +243,7 @@ async function afterSubmission(tabId,question,config,origin,signal) {
     last = await inspect(tabId,config,origin,signal);
     if (last.feedback==='wrong')return last;
     if (last.completed || last.stage === 'complete' || last.stage === 'lessons' ||
-      (last.question&&last.question.id!==question.id)||last.stage==='instruction'||last.needsPreparation) return last;
+      (last.question&&!sameQuestion(last,question))||last.stage==='instruction'||last.needsPreparation) return last;
     const action = last.navigation?.find(item=>['next','finish'].includes(item.kind));
     if (action) {
       const identity = `${snapshotKey(last)}:${action.id}`;
@@ -290,6 +292,10 @@ function updateQueue(state,snapshot) {
       item.name = lesson.name;
     }
     if (lesson.href) item.href = lesson.href;
+    // Core coursework and Pathways have different loading/navigation rules.
+    // Preserve the adapter's observed kind instead of treating every catalog
+    // left on screen during a route transition as a nested Pathways activity.
+    if (lesson.kind) item.kind = lesson.kind;
   }
   state.stats.lessonsTotal = state.queue.filter(item=>!['locked','alreadycompleted'].includes(item.status)).length;
 }
@@ -308,6 +314,9 @@ async function runLesson(tabId,subject,initial,lesson,config,origin,signal,state
       return {completed:true,snapshot};
     }
     if(snapshot.stage==='lessons') {
+      if (lesson.kind==='core-lesson' || coreCatalog(snapshot)) {
+        return {review:true,snapshot,message:'عاد الموقع إلى قائمة الدروس قبل تأكيد اكتمال الدرس الحالي. توقّف الحل في هذا الدرس ولم يفتح درسًا آخر.'};
+      }
       // A Pathways level contains several learning activities sharing one level
       // assessment. Enter one available activity, then use the visible Practice
       // control. The outer queue advances to the next level after completion.
@@ -367,23 +376,24 @@ async function runLesson(tabId,subject,initial,lesson,config,origin,signal,state
       const applied = await pageMessage(tabId,{type:'ALEF_APPLY',questionId:question.id,
         questionFingerprint:question.fingerprint,answer,selectors:config.selectors,autoSubmit:config.autoSubmit},origin,signal);
       if (!applied.submitted) {
-        return {review:true,blocking:true,snapshot,question,answer,message:applied.reason ||
+        return {review:true,blocking:true,snapshot,question,answer,applied:applied.applied===true,message:applied.reason ||
           'تم اختيار الإجابة. راجعها وأرسلها يدويًا؛ الإرسال التلقائي متوقف.'};
       }
       state.stats.solved++;
       lastSubmitted={question,answer};
-      await emit(tabId,'status','أُرسلت الإجابة. انتظار السؤال التالي…');
+      await emit(tabId,'submitted','أُرسلت الإجابة. انتظار السؤال التالي…',{question,answer,applied:true,submitted:true});
       await pause(300,signal);
       snapshot = await afterSubmission(tabId,question,config,origin,signal);
       continue;
     }
     if (snapshot.stage === 'instruction') {
-      const kinds = config.skipInstruction ? ['skip','assessment','next','finish'] : ['assessment','next','finish'];
-      const action = kinds.map(kind=>snapshot.navigation?.find(item=>item.kind===kind)).find(Boolean);
+      const kinds = config.skipInstruction ? ['skip','next','finish','assessment'] : ['next','finish','assessment'];
+      const action = kinds.map(kind=>snapshot.navigation?.find(item=>item.kind===kind &&
+        (kind!=='assessment'||item.sequential===true))).find(Boolean);
       if (!action) return {review:true,snapshot,message:diagnostic(snapshot,'يتطلب هذا الدرس مشاهدة أو تفاعلًا لا يمكن تجاوزه بزر ظاهر. يحتاج مراجعة يدوية.')};
       const identity = `${snapshotKey(snapshot)}:${action.id}`;
       if (clicked.has(identity)) return {review:true,snapshot,message:'لم يتغير الدرس بعد الانتقال. أوقف تكرار الضغط لمراجعة الصفحة.'};
-      if (introActions >= 12) return {review:true,snapshot,message:'وصل الدرس إلى حد خطوات المقدمة. راجع المحتوى قبل المتابعة.'};
+      if (introActions >= 250) return {review:true,snapshot,message:'وصل الدرس إلى حد 250 خطوة في المحتوى. توقّف التشغيل في الدرس الحالي للمراجعة.'};
       clicked.add(identity);
       introActions++;
       await emit(tabId,'status',action.kind === 'skip' ? 'تجاوز المقدمة بالزر الظاهر في الدرس…' : 'الانتقال إلى نشاط الدرس…');
@@ -502,9 +512,12 @@ async function run(tabId,subjectId,config,controller) {
       } else {
         lesson.status = 'review';lesson.reason = outcome.message;
         state.stats.review++;state.stats.lessonsReview++;
-        if (outcome.blocking || !catalogMode) {
-          await emit(tabId,'review',outcome.message,{blocking:true,question:outcome.question,answer:outcome.answer});return;
-        }
+        // An unresolved lesson is not a successful queue item. Keep the page
+        // and all later pending lessons intact so a failed control, loading
+        // issue or uncertain answer cannot cause a rapid tour of the course.
+        await emit(tabId,'review',outcome.message,{blocking:true,
+          question:outcome.question||snapshot?.question,answer:outcome.answer,
+          ...(outcome.applied!==undefined?{applied:outcome.applied,submitted:false}:{})});return;
       }
       if (!catalogMode) {
         state.currentLesson = null;
@@ -520,7 +533,6 @@ async function run(tabId,subjectId,config,controller) {
         snapshot = catalog;
         state.catalogURL = snapshot.page?.url || state.catalogURL;
         updateQueue(state,snapshot);
-        if (!outcome.completed) await emit(tabId,'review',outcome.message,{blocking:false,question:outcome.question,answer:outcome.answer});
         await emit(tabId,'queue','تحديث قائمة الدروس ومتابعة الدرس التالي…');
       }
     }

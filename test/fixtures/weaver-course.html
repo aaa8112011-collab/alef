@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<meta charset="utf-8">
+<title>Weaver course contract fixture</title>
+<style>
+body{font:16px/1.7 system-ui;max-width:1000px;margin:20px auto}button{padding:10px;margin:8px}
+main>section,.question-widget{padding:18px;border:1px solid #ddd;margin:12px}.mcq-option-content-container,.dnd-options-draggable,.dnd-droppable{padding:12px;border:1px solid #ccc;margin:8px;min-width:100px;min-height:30px}
+.dnd-options-draggable{display:inline-block}.dnd-droppable{display:inline-block;background:#f4f6fb}.dropdown-input-field-container{display:inline-block;padding:8px;border:1px solid #aaa}.is-selected{background:#dfefdf}[role=option]{padding:10px;border:1px solid #bbb}[hidden]{display:none!important}
+</style>
+<p>Local source-contract fixture; no authenticated Alef account or real model.</p>
+<main></main>
+<script>
+(() => {
+  const main=document.querySelector('main');
+  const includeDnd=new URLSearchParams(location.search).get('dnd')!=='0';
+  const types=includeDnd?['mcq','dropdown','dnd','text']:['mcq','dropdown','text'];
+  const lessons=[{id:'one',name:'1. Polynomial review'},{id:'two',name:'2. مراجعة الأشكال'}];
+  const state={actions:[],submissions:[],completed:[],lesson:null,intro:0,index:0};
+  let body,submit,answer=null,menu=null;
+  const record=(kind,extra={})=>state.actions.push({kind,lesson:state.lesson,...extra});
+  const node=(tag,text='',attrs={})=>{const n=document.createElement(tag);n.textContent=text;for(const[k,v]of Object.entries(attrs))n.setAttribute(k,v);return n;};
+  const button=(text,fn,testId)=>{const n=node('button',text,{type:'button',...(testId?{'data-testid':testId}:{})});n.onclick=fn;return n;};
+  function removeMenu(){menu?.remove();menu=null;}
+  function catalog(){
+    removeMenu();history.replaceState(null,'','#/classes/weaver-class?tab=assigned');
+    main.replaceChildren(node('h1','Math'));
+    main.append(node('button','المهام المسندة',{role:'tab','data-testid':'core-coursework-assigned-tab-select','data-state':'active','aria-selected':'true'}),node('button','الكل',{'data-testid':'core-coursework-assigned-all-chip-filter','aria-pressed':'true'}));
+    for(const lesson of lessons){
+      const card=node('article','',{'data-testid':'core-coursework-assigned-activity-card-navigate'});
+      card.append(node('h3',lesson.name,{dir:'ltr'}));
+      const open=button(state.completed.includes(lesson.id)?'Review':'Start',()=>{
+        state.lesson=lesson.id;state.intro=0;state.index=0;record('open');
+        history.replaceState(null,'',`#/progress/ncle/class/weaver-class/lesson/${lesson.id}/material/intro`);
+        // The URL and visible catalog layout can update before the player mounts.
+        card.append(node('span','Loading lesson…'));
+        setTimeout(instruction,360);
+      },'core-coursework-assigned-activity-btn-navigate');
+      card.append(open);main.append(card);
+    }
+  }
+  function shell(){
+    removeMenu();main.replaceChildren();
+    const page=node('section','',{'data-testid':'ncle-activity-page'});
+    const sidebar=node('aside','',{'data-testid':'ncle-main-contents'});
+    sidebar.append(button('Exit Ticket',()=>{record('sidebar-shortcut');throw new Error('Sidebar shortcut must not be used.');},'ncle-component-item'));
+    body=node('div','',{'data-testid':'ncle-activity-page-player'});
+    page.append(sidebar,body);main.append(page);
+  }
+  function instruction(){
+    shell();body.append(node('p',`الشرح المتسلسل ${state.intro+1}`));
+    const labels=['Start','Next',"I'll try later"];
+    body.append(button(labels[state.intro],()=>{
+      record('intro',{step:state.intro});state.intro++;
+      state.intro===3?question():instruction();
+    },state.intro===2?'navigation-skip-button':'navigation-next-button'));
+  }
+  function ready(value){
+    answer=value;
+    // Selection acknowledgment and enabled submit are separate React updates.
+    setTimeout(()=>{if(submit?.isConnected)submit.disabled=false;},75);
+  }
+  function question(){
+    shell();answer=null;
+    const type=types[state.index];
+    const q=node('section','',{class:`${type==='mcq'?'mcq':type==='text'?'open-ended':type}-container question-widget`});
+    const instruction=node('div',type==='mcq'?'Select the correct answer.':'أكمل الإجابة.',{id:'question-instruction'});
+    q.append(instruction);
+    if(type==='mcq'){
+      q.append(node('div','Simplify: 2x + 3x',{'data-testid':'question-statement-container',id:'question-statement-current'}));
+      const group=node('div','',{role:'radiogroup','aria-labelledby':'question-instruction','aria-describedby':'question-statement-current'});
+      for(const[id,label]of [['1','7x'],['2','5x']]){
+        const choice=node('div','',{'data-testid':'mcq-option-container',role:'radio','aria-checked':'false','aria-label':`MCQOption ${id}: ${label}`,'aria-describedby':`option-${id}-content`,tabindex:'0'});
+        const content=node('div','',{id:`option-${id}-content`,class:'mcq-option-content-container'});content.append(node('div',label,{'data-testid':'mcq-item-label'}));choice.append(content);
+        choice.onclick=()=>{
+          record('choice',{value:label});
+          setTimeout(()=>{choice.setAttribute('aria-checked','true');choice.setAttribute('aria-label',`MCQOption ${id}: ${label}. Selected`);choice.classList.add('is-selected');ready(label);},110);
+        };
+        group.append(choice);
+      }
+      q.append(group);
+    }else if(type==='dropdown'){
+      q.append(node('div','اختر العدد الذي يكمل 2 + [قائمة] = 4.',{'data-testid':'question-statement-container'}));
+      const sentence=node('div','قيمة العدد: ',{class:'dropdown-sentence-container'});
+      const blank=node('div','',{class:'dropdown-input-field-container','data-testid':'dropdown-blank','data-index':'blank'});
+      const control=node('div','',{class:'react-select__control'});
+      const combo=node('input','',{role:'combobox',readonly:'',type:'text','aria-expanded':'false'});
+      const selected=node('div','',{class:'dropdown-single-value-content'});
+      function open(){
+        if(menu)return;combo.setAttribute('aria-expanded','true');
+        menu=node('div','',{role:'listbox'});
+        for(const value of ['2','3']){
+          const option=node('div',value,{role:'option',id:`dropdown-option-${value}`,'aria-selected':'false'});
+          option.onclick=()=>{record('dropdown',{value});removeMenu();combo.setAttribute('aria-expanded','false');setTimeout(()=>{selected.textContent=value;ready(value);},110);};menu.append(option);
+        }
+        document.body.append(menu);
+      }
+      combo.onkeydown=event=>{if(event.key==='ArrowDown')open();if(event.key==='Escape'){removeMenu();combo.setAttribute('aria-expanded','false');}};
+      control.onmousedown=open;control.append(selected,combo);blank.append(control);sentence.append(blank);q.append(sentence);
+    }else if(type==='text'){
+      q.append(node('div','اكتب ناتج 3 + 4.',{'data-testid':'question-statement-container'}));
+      const input=node('textarea','',{id:'open-ended-textarea','data-testid':'open-ended-textarea'});
+      input.oninput=()=>{const value=input.value;setTimeout(()=>{const replacement=input.cloneNode();replacement.value=value;input.replaceWith(replacement);ready(value);},110);};q.append(input);
+    }else{
+      q.append(node('div','اختر كلمة لإكمال الجملة.',{'data-testid':'question-statement-container'}));
+      const sentence=node('div','يسقط المطر على هيئة ',{class:'dnd-sentence-container'});
+      const blank=node('div','',{class:'dnd-droppable',id:'droppable-0','data-index':'0',tabindex:'0'});sentence.append(blank);q.append(sentence);
+      for(const word of ['ماء','هواء']){
+        const option=node('div',word,{class:'dnd-options-draggable',role:'button',tabindex:'0'});
+        option.onmousedown=event=>{
+          if(event.button!==0)return;
+          const started=Date.now();const initial={x:event.clientX,y:event.clientY};let cancelled=false,last=initial;
+          const activation=setTimeout(()=>{if(!cancelled){option.classList.add('is-dragging');option.setAttribute('aria-pressed','true');}},100);
+          const move=e=>{
+            last={x:e.clientX,y:e.clientY};
+            if(Date.now()-started<100&&Math.hypot(last.x-initial.x,last.y-initial.y)>5)cancelled=true;
+            const r=blank.getBoundingClientRect();
+            if(!cancelled&&Date.now()-started>=100&&last.x>=r.left&&last.x<=r.right&&last.y>=r.top&&last.y<=r.bottom)setTimeout(()=>blank.classList.add('is-about-to-drop'),25);
+          };
+          const up=()=>{
+            clearTimeout(activation);option.classList.remove('is-dragging');option.setAttribute('aria-pressed','false');
+            document.removeEventListener('mousemove',move);document.removeEventListener('mouseup',up);
+            const r=blank.getBoundingClientRect();
+            if(cancelled||Date.now()-started<100||last.x<r.left||last.x>r.right||last.y<r.top||last.y>r.bottom)return;
+            record('drag',{value:word});setTimeout(()=>{blank.textContent=word;blank.classList.add('is-selected');option.remove();ready(word);},110);
+          };
+          document.addEventListener('mousemove',move);document.addEventListener('mouseup',up);
+        };q.append(option);
+      }
+    }
+    submit=button('Submit answer',()=>{
+      const expected={mcq:'5x',dropdown:'2',text:'7',dnd:'ماء'}[type];
+      state.submissions.push({lesson:state.lesson,type,answer,correct:answer===expected});record('submit',{type});
+      if(answer!==expected)throw new Error('Incorrect deterministic fixture answer.');
+      removeMenu();submit.remove();
+      for(const control of q.querySelectorAll('input,textarea,[role="radio"],[role="combobox"],.dnd-options-draggable')){
+        control.setAttribute('aria-disabled','true');if(control.matches('input,textarea'))control.readOnly=true;
+      }
+      body.append(node('p','Correct answer',{'data-testid':'answer-feedback'}),button('Next',()=>{record('next',{type});state.index++;state.index===types.length?sectionResult():question();},'navigation-next-button'));
+    },'navigation-next-button');submit.disabled=true;
+    body.append(q,submit);
+  }
+  function sectionResult(){
+    shell();body.append(node('div','Section result',{'data-testid':'ncle-assessment-result'}));
+    body.append(button('Finish',()=>{
+      record('finish');state.completed.push(state.lesson);main.replaceChildren();
+      const completion=node('section','',{'data-testid':'ncle-completion-page'});
+      completion.append(node('h1','Completed'),button('Back to coursework',()=>{record('back');catalog();},'ncle-completion-page-back'));main.append(completion);
+    },'activity-navigation-bar__finish-button'));
+  }
+  window.weaverFixture={get state(){return structuredClone(state);}};
+  main.append(button('الرياضيات',catalog));main.firstElementChild.setAttribute('data-alef-subject','math');
+})();
+</script>
+</html>

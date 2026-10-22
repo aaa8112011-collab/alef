@@ -1,7 +1,7 @@
 (() => {
   'use strict';
-  if (globalThis.__alefAssistantInstalled==='0.5.4') return;
-  globalThis.__alefAssistantInstalled = '0.5.4';
+  if (globalThis.__alefAssistantInstalled==='0.5.5') return;
+  globalThis.__alefAssistantInstalled = '0.5.5';
 
   let selectors = {};
   let subjects = new Map();
@@ -443,6 +443,32 @@
     return all('[role="status"],[role="alert"],h1,h2').some(el=>!catalogAncestor(el) &&
       /^(اكملت الدرس|اكملت الدرس بنجاح|اكملت الواجب بنجاح|اكتمل الدرس|اكتملت الاسئلة|lesson complete|lesson completed|assessment complete|assessment completed|you completed this lesson|all questions completed)$/.test(norm(text(el))));
   }
+  function instructionPosition() {
+    const positions=[];
+    // Weaver can hide the numeric count while retaining its segmented bar.
+    // These are authored slide positions, not changes in playback or buffering.
+    for(const bar of all('[data-testid="slides-progress-bar"],[data-testid="k4-slides-progress-bar"],#slides-progress-bar,#k4-slides-progress-bar')) {
+      const segments=all('[data-testid="bar-active"],[data-testid="bar-inactive"],[data-testid="k4-bar-active"],[data-testid="k4-bar-inactive"]',bar);
+      if(!segments.length||segments.length>250)continue;
+      let slideId=null;
+      for(let parent=bar.parentElement;parent;parent=parent.parentElement) {
+        if(parent.matches('main#player-container,[data-testid="player-wrapper"],[data-testid$="-player-wrapper"],'+PLAYER_SCOPES))break;
+        const id=parent.getAttribute('data-testid');
+        if(id){slideId=id.slice(0,180);break;}
+      }
+      const declared=Number(bar.getAttribute('data-progressbar-no-of-slides'));
+      positions.push({slideId,total:Number.isInteger(declared)&&declared>0&&declared<=250?declared:segments.length,
+        states:segments.map(segment=>segment.getAttribute('data-testid').endsWith('bar-inactive')?'inactive':'active')});
+    }
+    return positions.length?{positions}:null;
+  }
+  const MEDIA_UI='.lib-controls-bar,.lib-video-seekbar,.lib-seekbar-container,.lib-volume-slider-time-section,.lib-playrate-container,.lib-playrate-list,.lib-video-subtitle-container,.lib-cc-list,[data-testid="transcript-container"],[data-testid="video-big-play-btn"],.lib-video-big-play-btn';
+  function instructionTextOf(node) {
+    if(!node||node.matches(MEDIA_UI))return '';
+    // Media controls and timed subtitles can tick without any Next navigation.
+    // Keep them out of the navigation identity; question extraction is unchanged.
+    return (node.querySelector(MEDIA_UI)?promptBody(node,{omitMediaUI:true}):text(node)).slice(0,3000);
+  }
   function inspect() {return withReadPass(inspectPage);}
   function inspectPage() {
     const listedSubjects=discoverSubjects();
@@ -487,17 +513,18 @@
       listedSubjects.push({id:'current',name:'المادة المفتوحة حاليًا'});
     }
     const progress=text(first('[data-testid="progress-bar-slide-count"]'));
-    const instructionText=text(first('[data-alef-instruction],[data-testid="content-page-body-player"],.instruction,main')).slice(0,3000);
-    const fingerprint=hash(JSON.stringify([location.pathname,location.search,location.hash,progress,stage,catalog,listedSubjects,listedLessons,question?.id,question?.fingerprint,navigation,completed,loading,frames,instructionText]));
+    const instructionStep=instructionPosition();
+    const instructionText=instructionTextOf(first('[data-alef-instruction],[data-testid="content-page-body-player"],.instruction,main'));
+    const fingerprint=hash(JSON.stringify([location.pathname,location.search,location.hash,progress,instructionStep,stage,catalog,listedSubjects,listedLessons,question?.id,question?.fingerprint,navigation,completed,loading,frames,instructionText]));
     // Loading flags and temporary enabled/disabled controls are not evidence
     // that the platform advanced a step. Preserve a separate content identity.
-    const transitionFingerprint=hash(JSON.stringify([location.pathname,location.search,location.hash,progress,stage,
+    const transitionFingerprint=hash(JSON.stringify([location.pathname,location.search,location.hash,progress,instructionStep,stage,
       catalog&&{type:catalog.type,tab:catalog.tab,filter:catalog.filter,empty:catalog.empty,error:catalog.error},
       listedSubjects,listedLessons,question?.id,question?.fingerprint,completed,
       frames.map(({url,origin,kind,role,required,independent})=>({url,origin,kind,role,required,independent})),instructionText]));
     return {ok:true,page:{title:document.title,url:location.href},stage,subjects:listedSubjects,lessons:listedLessons,
       question,needsPreparation:!!questionState.needsPreparation,feedback:questionState.feedback,completed,canNext:navigation.some(action=>action.kind==='next'),navigation,fingerprint,transitionFingerprint,...(catalog?{catalog}:{}),
-      loading,frames,context:{frame:window!==window.top,documentReadyState:document.readyState},
+      loading,frames,...(instructionStep?{instructionStep}:{}),context:{frame:window!==window.top,documentReadyState:document.readyState},
       ...(questionEvidence?{questionEvidence:{...questionEvidence}}:{}),
       diagnostics:[...new Set(diagnostics)],capabilities:{text:true,single:true,multiple:true,images:true,visionCapture:true,dragAndDrop:true,customSelectors:true,courseNavigation:true,frameContext:true}};
   }
@@ -736,7 +763,7 @@
   const PROMPT_CONTEXT='[data-alef-question-context],[data-testid="question-statement-container"],.question-statement-container';
   const CONTEXT_CHROME='aside,nav,button,[role="button"],input,textarea,select,[role="banner"],[role="navigation"],[data-testid="ncle-main-contents"],[data-testid="ncle-sidebar"],[data-testid="progress-bar-slide-count"],[role="progressbar"]';
   const PROMPT_FEEDBACK='[data-testid="general-answer-feedback"],[data-testid="answerFeedback"],[data-testid="answer-feedback"],[data-testid="correct-answer-feedback"],[data-alef-feedback],[data-testid="wrong-answer-feedback"],[data-testid$="question-feedback-container"],[data-testid="custom-feedback-container"],[role="status"],[role="alert"]';
-  function promptBody(authored,{context=false}={}) {
+  function promptBody(authored,{context=false,omitMediaUI=false}={}) {
     if(authored.nodeType===3)return visible(authored.parentElement)?clean(authored.textContent):'';
     if(authored.matches(PROMPT_FEEDBACK)||context&&authored.matches(CONTEXT_CHROME))return '';
     const copy=authored.cloneNode(true);
@@ -757,6 +784,7 @@
     copy.querySelectorAll('[data-testid="draggableChoice"],[data-testid="choice-item-dd"],[data-testid="general-answer-feedback"],[data-testid="answerFeedback"],[data-testid="answer-feedback"],[data-testid="correct-answer-feedback"],[data-alef-feedback],[data-testid="wrong-answer-feedback"],[data-testid$="question-feedback-container"],[data-testid="custom-feedback-container"],[role="status"],[role="alert"]').forEach(node=>node.remove());
     copy.querySelectorAll('button,input,textarea,[data-alef-option],[data-testid="choice-item"],[role="radio"],[role="checkbox"],label,[data-testid="matching-choices"],[data-testid="matching-answers"],[data-testid^="matching-choice-"],[data-testid^="matching-answer-"],[data-alef-item],[data-alef-target],[role="listbox"],[class*="react-select"],[hidden],[aria-hidden="true"],script,style').forEach(node=>node.remove());
     if(context)copy.querySelectorAll(CONTEXT_CHROME).forEach(node=>node.remove());
+    if(omitMediaUI)copy.querySelectorAll(MEDIA_UI).forEach(node=>node.remove());
     // A detached copy has no layout-derived innerText line breaks. Preserve
     // boundaries between instruction, stem and math instead of joining words.
     copy.querySelectorAll('div,p,section,h1,h2,h3,h4,li,br').forEach(node=>{node.prepend(' ');node.append(' ');});
@@ -1042,7 +1070,7 @@
       appRoots:[...document.querySelectorAll('#root,#app,app-root,[data-reactroot],main')].slice(0,8).map(node=>({
         tag:node.tagName,kind:node.matches('#root')?'root':node.matches('#app')?'app':node.matches('main')?'main':'app-root',
         children:node.childElementCount,visible:visible(node)}))};
-    return {ok:true,diagnostics:{version:'0.5.4',page:{url:cleanUrl(location.href)},stage:snapshot.stage,rendering,
+    return {ok:true,diagnostics:{version:'0.5.5',page:{url:cleanUrl(location.href)},stage:snapshot.stage,rendering,
       subjects:snapshot.subjects,lessons:snapshot.lessons.map(({href,...lesson})=>({...lesson,href:href?cleanUrl(href):undefined})),
       navigation:snapshot.navigation,issues:snapshot.diagnostics,frames:snapshot.frames,loading:snapshot.loading,
       ...(snapshot.questionEvidence?{questionEvidence:snapshot.questionEvidence}:{}),

@@ -12,6 +12,7 @@ const pendingStarts = new Map();
 const states = new Map();
 const frameRoutes = new Map();
 const reviewMessages = {
+  missing_question_text:'لم يصل نص المسألة؛ وصلت تعليمات اختيار الإجابة فقط. أعد فحص السؤال بالقارئ المحدّث.',
   low_confidence:'تقدير الثقة منخفض؛ راجع الإجابة قبل إرسالها.',
   verification_disagreement:'لم تتفق عمليتا الحل والتحقق؛ راجع السؤال.',
   invalid_selection:'خيارات الإجابة لا تطابق السؤال؛ لم تُطبّق الإجابة.',
@@ -285,7 +286,9 @@ async function inspect(tabId,config,origin,signal) {
       inspected.every(child=>!child.loading&&['instruction','unknown'].includes(child.stage))&&
       parentNavigation.some(action=>['next','finish'].includes(action.kind))) {
       state.blockedFrames=[];
-      return {...top,stage:'instruction',loading:false,framePending:false,navigation:parentNavigation};
+      return {...top,stage:'instruction',loading:false,framePending:false,navigation:parentNavigation,
+        ...(top.transitionFingerprint&&inspected.every(child=>child.transitionFingerprint)?
+          {transitionFingerprint:JSON.stringify([top.transitionFingerprint,...inspected.map(child=>child.transitionFingerprint)])}:{})};
     }
     // A material frame can mount as about:blank before its actual document is
     // visible to webNavigation. Let the bounded player-readiness wait handle it.
@@ -301,7 +304,9 @@ async function inspect(tabId,config,origin,signal) {
     const navigation=(top.navigation||[]).filter(action=>['next','finish','back'].includes(action.kind));
     return {...top,stage:'instruction',question:null,completed:false,
       loading:top.loading||!navigation.some(action=>['next','finish'].includes(action.kind)),
-      frameResult:true,navigation};
+      frameResult:true,navigation,
+      ...(top.transitionFingerprint&&child.transitionFingerprint?
+        {transitionFingerprint:JSON.stringify([top.transitionFingerprint,selected.frameId,child.transitionFingerprint])}:{})};
   }
   routes.active=selected.frameId;
   const navigation=(child.navigation||[]).map(action=>({...action,frameId:selected.frameId,frameFingerprint:child.fingerprint}));
@@ -311,12 +316,22 @@ async function inspect(tabId,config,origin,signal) {
     frameContext:{frameId:selected.frameId,origin:frameOrigin(selectedRecord?.url,origin),
       documentId:selectedRecord?.documentId||null,url:lessonPageKey(child.page?.url||selectedRecord?.url),
       topPageKey:lessonPageKey(top.page?.url)},
-    fingerprint:`frame:${selected.frameId}:${child.fingerprint}`,diagnostics:child.diagnostics||[]};
+    fingerprint:`frame:${selected.frameId}:${child.fingerprint}`,
+    ...(top.transitionFingerprint&&child.transitionFingerprint?
+      {transitionFingerprint:JSON.stringify([top.transitionFingerprint,selected.frameId,child.transitionFingerprint])}:{}),
+    diagnostics:child.diagnostics||[]};
 }
 const snapshotKey = snapshot => snapshot?.fingerprint || JSON.stringify([
   snapshot?.stage,snapshot?.question?.id,snapshot?.question?.fingerprint,snapshot?.completed,
   snapshot?.lessons?.map(item=>[item.id,item.locked,item.completed]),snapshot?.navigation?.map(item=>[item.id,item.kind]),snapshot?.catalog,
 ]);
+// A spinner, disabled button or frame readyState can change before a click has
+// advanced any actual content. Those changes must not authorize another Next.
+const transitionKey = snapshot => snapshot?.transitionFingerprint || snapshotKey(snapshot);
+const forwardAction = action => ['skip','next','finish','assessment'].includes(action.kind);
+const actionKey = action => `${action.frameId||0}:${action.id}:${action.kind}`;
+const newForwardAction = (snapshot,previous) => (snapshot?.navigation||[]).some(action=>forwardAction(action)&&
+  !(previous.navigation||[]).some(before=>actionKey(before)===actionKey(action)));
 const coreCatalog = snapshot => snapshot?.stage === 'lessons' && snapshot.catalog?.type === 'core-coursework';
 
 async function prepareCatalog(tabId,initial,config,origin,signal,{expandAll=false,targetId}={}) {
@@ -444,24 +459,33 @@ async function navigate(tabId,snapshot,action,config,origin,signal) {
 async function afterSubmission(tabId,question,config,origin,signal) {
   const started = Date.now();
   const clicked = new Set();
-  let last;
+  let last,lastNavigation;
   while (Date.now()-started < 15000) {
     assertActive(signal);
     last = await inspect(tabId,config,origin,signal);
     if (last.feedback==='wrong')return last;
-    if (last.completed || last.stage === 'complete' || last.stage === 'lessons' ||
-      (last.question&&!sameQuestion(last,question))||last.stage==='instruction'||last.needsPreparation) return last;
+    const ready=last.permissionRequired||blockedLessonMessage(last)||last.completed||last.stage==='complete'||last.stage==='lessons'||
+      last.question&&!sameQuestion(last,question)||last.needsPreparation;
+    // A question may unmount before its Next transition finishes. Do not hand
+    // that busy instruction shell to runLesson, whose own click history starts
+    // before submission. A new ready question or a new forward control can
+    // proceed immediately, even alongside a persistent progress indicator.
+    if(lastNavigation&&!ready&&(last.loading||last.framePending)&&!newForwardAction(last,lastNavigation)) {
+      await pause(250,signal);continue;
+    }
+    if (ready||last.stage==='instruction') return last;
     const action = last.navigation?.find(item=>['next','finish'].includes(item.kind));
     if (action) {
-      const identity = `${snapshotKey(last)}:${action.id}`;
+      const identity = `${transitionKey(last)}:${actionKey(action)}`;
       if (!clicked.has(identity)) {
         clicked.add(identity);
+        lastNavigation=last;
         await navigate(tabId,last,action,config,origin,signal);
       }
     }
     await pause(250,signal);
   }
-  return last || {stage:'unknown',question:null,completed:false};
+  return last ? {...last,...(lastNavigation?{navigationPending:true}:{})} : {stage:'unknown',question:null,completed:false};
 }
 async function solve(question,subject,config,signal) {
   // Local models can take minutes on a CPU. Stop still aborts immediately.
@@ -581,6 +605,8 @@ async function runLesson(tabId,subject,initial,lesson,config,origin,signal,state
   const answerKey=answer=>answer.optionIds?.length?JSON.stringify([...answer.optionIds].sort()):answer.matches?JSON.stringify([...answer.matches].sort((a,b)=>a.itemId.localeCompare(b.itemId))):(answer.text||'').normalize('NFKC').trim();
   while (true) {
     assertActive(signal);
+    if(snapshot.navigationPending)return {review:true,snapshot,
+      message:'لم يكتمل الانتقال بعد إرسال الإجابة. توقف التشغيل في الدرس الحالي دون تكرار زر التالي.'};
     if(snapshot.permissionRequired)return {review:true,blocking:true,snapshot,cause:'frame_permission_required',
       message:diagnostic(snapshot,'يحتاج محتوى الدرس إذن Chrome. اضغط «السماح بمحتوى الدرس» في مُعين ثم تابع الدرس الحالي.')};
     const blocked=blockedLessonMessage(snapshot);
@@ -692,15 +718,16 @@ async function runLesson(tabId,subject,initial,lesson,config,origin,signal,state
       const action = kinds.map(kind=>snapshot.navigation?.find(item=>item.kind===kind &&
         (kind!=='assessment'||item.sequential===true))).find(Boolean);
       if (!action) return {review:true,snapshot,message:diagnostic(snapshot,'لم يظهر سؤال مدعوم أو زر متابعة مفعّل. بقي التشغيل على الدرس الحالي ولم يُفتح درس آخر.')};
-      const identity = `${snapshotKey(snapshot)}:${action.id}`;
+      const identity = `${transitionKey(snapshot)}:${actionKey(action)}`;
       if (clicked.has(identity)) return {review:true,snapshot,message:'لم يتغير الدرس بعد الانتقال. أوقف تكرار الضغط لمراجعة الصفحة.'};
       if (introActions >= 250) return {review:true,snapshot,message:'وصل الدرس إلى حد 250 خطوة في المحتوى. توقّف التشغيل في الدرس الحالي للمراجعة.'};
       clicked.add(identity);
       introActions++;
       await emit(tabId,'status',action.kind === 'skip' ? 'تجاوز المقدمة بالزر الظاهر في الدرس…' : 'الانتقال إلى نشاط الدرس…');
-      const previous = snapshotKey(snapshot);
+      const previous = snapshot;
       await navigate(tabId,snapshot,action,config,origin,signal);
-      snapshot = await waitSnapshot(tabId,config,origin,signal,item=>snapshotKey(item)!==previous && item.stage!=='unknown');
+      snapshot = await waitSnapshot(tabId,config,origin,signal,item=>item.stage!=='unknown'&&
+        (transitionKey(item)!==transitionKey(previous)||newForwardAction(item,previous)),12000,{loadingTimeout:30000});
       continue;
     }
     return {review:true,snapshot,message:diagnostic(snapshot,

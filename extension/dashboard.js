@@ -196,7 +196,9 @@ function showAnswer(event) {
     const question=event.question||displayedQuestion;
     const selected = question?.options?.filter(option=>event.answer.optionIds?.includes(option.id)).map(option=>option.text) || [];
     const pairs=event.answer.matches?.map(pair=>`${question?.items?.find(item=>item.id===pair.itemId)?.text||pair.itemId} ← ${question?.targets?.find(item=>item.id===pair.targetId)?.text||pair.targetId}`)||[];
-    $('answer-text').textContent = pairs.length?pairs.join('\n'):selected.length ? selected.join('، ') : (event.answer.text || 'لا توجد إجابة قابلة للتطبيق');
+    const answerText=pairs.length?pairs.join('\n'):selected.length?selected.join('، '):(event.answer.text||'').trim();
+    $('answer-label').textContent=answerText?'الإجابة المقترحة':'تعذّر إكمال الحل';
+    $('answer-text').textContent=answerText||'لم تُحدَّد إجابة من البيانات المقروءة';
     $('explanation').textContent = event.answer.explanation || '';
     const confidence = Number(event.answer.confidence);
     $('confidence').textContent = Number.isFinite(confidence) ? `تقدير ثقة النموذج: ${Math.round(confidence*100)}٪` : '';

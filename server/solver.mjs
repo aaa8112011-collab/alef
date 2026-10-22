@@ -86,6 +86,17 @@ function missingDiagramFromText(question) {
     || /في\s+الرسم|الرسم\s+البياني|(?:الشكل|الرسم)\s+(?:المقابل|التالي|الموضح|ادناه)|الصورة\s+(?:المقابلة|التالية|الموضحة)/.test(text);
 }
 
+function instructionWithoutQuestion(question) {
+  if (question.images?.length || !['single','multiple','text'].includes(question.type)) return false;
+  const value = question.text.normalize('NFKC').toLowerCase()
+    .replace(/[\u064b-\u065f\u0670\u0640]/g,'').replace(/[أإآ]/g,'ا').replace(/ى/g,'ي')
+    .replace(/[\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g,'')
+    .replace(/[\s.:!؟?،,؛]+/g,' ').trim();
+  // These are control instructions, not a problem stem. Reject only complete
+  // instruction strings: genuine questions containing these words still pass.
+  return /^(?:(?:select (?:all (?:the )?correct answers|all that apply|the correct answers?|an? answers?)|choose (?:the correct answers?|an? answers?)|answer the (?:following )?question|اختر (?:جميع الاجابات الصحيحة|الاجابات الصحيحة|الاجابة الصحيحة|اجابة صحيحة|الاجابة)|حدد (?:الاجابة الصحيحة|الاجابات الصحيحة)|اكتب الاجابة)(?:\s+|$))+$/.test(value);
+}
+
 function validateMatchingCollection(collection) {
   if (!Array.isArray(collection) || collection.length < 1 || collection.length > 20) {
     throw new SolverError('invalid_request', 'عناصر المطابقة وأهدافها يجب أن تضم من عنصر واحد إلى 20 عنصرًا.', 400);
@@ -394,6 +405,10 @@ export async function solveQuestion(rawInput, config, parentSignal) {
   if ((input.question.requiresVision || missingDiagramFromText(input.question)) && !input.question.images?.length) {
     return {answer:{optionIds:[],text:'',explanation:'لم تصل صورة الرسم المطلوبة للحل؛ لن تُخمن الإجابة.',confidence:0,
       ...(input.question.type === 'matching' ? {matches:[]} : {})},verified:false,needsReview:true,reason:'missing_visual_evidence'};
+  }
+  if (instructionWithoutQuestion(input.question)) {
+    return {answer:{optionIds:[],text:'',explanation:'وصلت تعليمات اختيار الإجابة فقط؛ لم يصل نص المسألة الظاهر أعلى الخيارات. أعد فحص السؤال بالقارئ المحدّث.',confidence:0},
+      verified:false,needsReview:true,reason:'missing_question_text'};
   }
   if (input.qualityMode) {
     const exact = solveExactMath(input.question);

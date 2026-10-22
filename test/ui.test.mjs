@@ -684,6 +684,20 @@ test('session completion replaces waiting-for-next status and restores the final
 });
 
 
+test('an abstained answer explains missing input without claiming the problem has no answer',async()=>{
+  const h=await dashboardHarness({connected:true});
+  try{
+    await h.page.evaluate(()=>__uiTest.emit({kind:'review',blocking:true,message:'نص المسألة غير كامل.',cause:'missing_question_text',
+      currentLesson:{id:'similarity',name:'Similar Triangles'},question:{id:'q',text:'Select the correct answer.',options:[{id:'p',text:'They are proportional.'}]},
+      answer:{optionIds:[],text:'',explanation:'لم يصل نص المسألة الظاهر أعلى الخيارات.',confidence:0}}));
+    assert.equal(await h.page.locator('#answer-label').textContent(),'تعذّر إكمال الحل');
+    assert.equal(await h.page.locator('#answer-text').textContent(),'لم تُحدَّد إجابة من البيانات المقروءة');
+    assert.match(await h.page.locator('#explanation').textContent(),/لم يصل نص المسألة/);
+    assert.doesNotMatch(await h.page.locator('#answer-box').textContent(),/لا توجد إجابة/);
+    assert.equal(await h.page.locator('#answer-state').getAttribute('data-state'),'review');
+  }finally{await h.close();}
+});
+
 test('fresh dashboard starts in higher accuracy mode and persists reasoning plus independent review without credentials',async()=>{
   const harness=await dashboardHarness({connected:true});
   try{

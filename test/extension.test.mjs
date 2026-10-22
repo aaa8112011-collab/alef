@@ -170,13 +170,13 @@ test('text change events advancing to a new question never submit the new questi
   const harness = await openMath(t);
   await harness.page.evaluate(() => {
     const exercise = document.querySelector('main');
-    exercise.innerHTML = '<section data-alef-question="text-old"><h2 data-alef-question-text>اكتب الإجابة.</h2><textarea data-alef-answer></textarea><button data-alef-submit>إرسال</button></section>';
+    exercise.innerHTML = '<section data-alef-question="text-old"><h2 data-alef-question-text>اكتب ناتج ٣ + ٤.</h2><textarea data-alef-answer></textarea><button data-alef-submit>إرسال</button></section>';
     window.unexpectedSubmissions = 0;
     exercise.addEventListener('click', event => {
       if (event.target.matches('[data-alef-submit]')) window.unexpectedSubmissions += 1;
     });
     exercise.querySelector('textarea').addEventListener('change', () => {
-      exercise.innerHTML = '<section data-alef-question="text-new"><h2 data-alef-question-text>اكتب الإجابة.</h2><textarea data-alef-answer></textarea><button data-alef-submit>إرسال</button></section>';
+      exercise.innerHTML = '<section data-alef-question="text-new"><h2 data-alef-question-text>اكتب ناتج ٣ + ٤.</h2><textarea data-alef-answer></textarea><button data-alef-submit>إرسال</button></section>';
     });
   });
   const question = await currentQuestion(harness);
@@ -192,7 +192,7 @@ test('framework-rejected text values prevent submission', async t => {
   const harness = await openMath(t);
   await harness.page.evaluate(() => {
     const exercise = document.querySelector('main');
-    exercise.innerHTML = '<section data-alef-question="text-controlled"><h2 data-alef-question-text>اكتب الإجابة.</h2><textarea data-alef-answer></textarea><button data-alef-submit>إرسال</button></section>';
+    exercise.innerHTML = '<section data-alef-question="text-controlled"><h2 data-alef-question-text>اكتب ناتج ٣ + ٤.</h2><textarea data-alef-answer></textarea><button data-alef-submit>إرسال</button></section>';
     window.unexpectedSubmissions = 0;
     exercise.querySelector('button').addEventListener('click', () => { window.unexpectedSubmissions += 1; });
     exercise.querySelector('textarea').addEventListener('input', event => { event.target.value = ''; });

@@ -1,7 +1,7 @@
 (() => {
   'use strict';
-  if (globalThis.__alefAssistantInstalled==='0.5.3') return;
-  globalThis.__alefAssistantInstalled = '0.5.3';
+  if (globalThis.__alefAssistantInstalled==='0.5.4') return;
+  globalThis.__alefAssistantInstalled = '0.5.4';
 
   let selectors = {};
   let subjects = new Map();
@@ -11,7 +11,9 @@
   let fillCache = null;
   let weaverDragCache = null;
   let cancelled = false;
-  let rootsCache = null;
+  // A scan is synchronous and read-only. Share expensive DOM/style lookups
+  // within that scan, then discard them before any click or asynchronous wait.
+  let readPass = null;
   let frameEntries = new Map();
   const frameLoadStates = new WeakMap();
   let topCourseContext = false;
@@ -19,7 +21,7 @@
   const inferredOptions = new WeakMap();
   const clean = value => String(value || '').replace(/\s+/g, ' ').trim();
   const WEAVER_QUESTIONS='.mcq-container.question-widget,.dropdown-container.question-widget,.open-ended-container.question-widget,.fib-container.question-widget,.dnd-container.question-widget';
-  const PLAYER_SCOPES='[data-testid="assessment-content-player"],[data-testid="ncle-activity-page-player"],[data-testid="content-page-body-player"]';
+  const PLAYER_SCOPES='[data-testid="assessment-content-player"],[data-testid="ncle-activity-page-player"],[data-testid="content-page-body-player"],main#player-container';
   const hash = text => {
     let n = 2166136261;
     for (const c of text) n = Math.imul(n ^ c.charCodeAt(0), 16777619);
@@ -27,25 +29,55 @@
   };
   const isElement = node => node?.nodeType === 1;
   const view = node => node.ownerDocument.defaultView;
+  function withReadPass(read) {
+    if(readPass)return read();
+    readPass={roots:new WeakMap(),styles:new WeakMap(),visible:new WeakMap(),ancestors:new WeakMap(),visual:new WeakMap()};
+    try{return read();}finally{readPass=null;}
+  }
+  function styleOf(node) {
+    const cached=readPass?.styles.get(node);
+    if(cached)return cached;
+    const style=view(node).getComputedStyle(node);
+    readPass?.styles.set(node,style);
+    return style;
+  }
+  function ancestorsVisible(el) {
+    const path=[];
+    let allowed=true;
+    for(let node=el;node;node=node.parentElement||node.getRootNode()?.host) {
+      const cached=readPass?.ancestors.get(node);
+      if(cached!==undefined){allowed=cached;break;}
+      path.push(node);
+      const style=styleOf(node);
+      if(node.matches('[hidden],[aria-hidden="true"],[inert]')||style.display==='none'||style.visibility==='hidden'||style.visibility==='collapse') {
+        allowed=false;break;
+      }
+    }
+    for(const node of path)readPass?.ancestors.set(node,allowed);
+    return allowed;
+  }
   const norm = value => clean(value).toLowerCase().normalize('NFKC')
     .replace(/[\u064B-\u065F\u0670\u0640]/g,'').replace(/[أإآ]/g,'ا').replace(/ى/g,'ي')
     .replace(/[\u200b-\u200f\u202a-\u202e]/g,'').replace(/[\s:!؟?.،,·•|]+/g,' ').trim();
   function visible(el) {
     if (!isElement(el) || !el.isConnected) return false;
+    const cached=readPass?.visible.get(el);
+    if(cached!==undefined)return cached;
+    const result=visibleElement(el);
+    readPass?.visible.set(el,result);
+    return result;
+  }
+  function visibleElement(el) {
     // Layout-only wrappers have no rectangle of their own. Their rendered
     // children still contain the question/choices, including in display:contents.
-    if (!el.getClientRects().length && (view(el).getComputedStyle(el).display!=='contents' || ![...el.children].some(visible))) return false;
-    for (let node=el;node;) {
-      if (node.matches('[hidden],[aria-hidden="true"],[inert]')) return false;
-      const style=view(node).getComputedStyle(node);
-      if (style.display==='none' || style.visibility==='hidden' || style.visibility==='collapse') return false;
-      node=node.parentElement || node.getRootNode()?.host;
-    }
+    if (!el.getClientRects().length && (styleOf(el).display!=='contents' || ![...el.children].some(visible))) return false;
+    if(!ancestorsVisible(el))return false;
     try { const frame=view(el).frameElement; if(frame && !visible(frame))return false; } catch { return false; }
     return true;
   }
   function roots(scope=document) {
-    if(scope===document && rootsCache)return rootsCache;
+    const cached=readPass?.roots.get(scope);
+    if(cached)return cached;
     const found=[],seen=new Set();
     function visit(root) {
       if(!root || seen.has(root))return;
@@ -62,7 +94,7 @@
       }
     }
     visit(scope);
-    if(scope===document)rootsCache=found;
+    readPass?.roots.set(scope,found);
     return found;
   }
   function describeFrame(node,doc) {
@@ -105,7 +137,10 @@
       role:supplementary?'supplementary':required?'lesson':'unknown',...(sandbox?{sandbox}:{})};
   }
   const all = (query,scope=document) => [...new Set(roots(scope).flatMap(root=>[...root.querySelectorAll(query)]))].filter(visible);
-  const first = (query,scope=document) => all(query,scope)[0] || null;
+  function first(query,scope=document) {
+    for(const root of roots(scope))for(const node of root.querySelectorAll(query))if(visible(node))return node;
+    return null;
+  }
   const disabled = el => !el || !!el.disabled || el.getAttribute('aria-disabled')==='true' || el.getAttribute('aria-busy')==='true' ||
     !!el.closest('[inert],[data-locked="true"],[data-disabled="true"]');
   function safeHref(el) {
@@ -141,7 +176,7 @@
     function read(node) {
       if (node.nodeType === 3) return node.textContent;
       if (!isElement(node)) return '';
-      const style=view(node).getComputedStyle(node);
+      const style=styleOf(node);
       if (node.matches('[hidden],[aria-hidden="true"],script,style') || style.display==='none' || ['hidden','collapse'].includes(style.visibility)) return '';
       if (node.matches('.katex,math,mjx-container')) {
         const latex = node.querySelector('annotation[encoding="application/x-tex"]');
@@ -185,9 +220,20 @@
   const CORE_CATALOG_TABS = '[data-testid="core-coursework-foryou-tab-select"],[data-testid="core-coursework-assigned-tab-select"],[data-testid="core-coursework-alllessons-tab-select"]';
   const LESSON_CARDS = CORE_LESSON_CARDS+', [data-testid^="level-card-container-"],[data-alef-lesson],[data-lesson-id],[data-activity-id],[data-testid="lesson-card"],[data-testid="lesson-item"],[data-testid="activity-card"],[data-testid="assignment-card"],.lesson-card,.lesson-item,.activity-card,[class*="lessonCard"],[class*="lessonItem"],ul[aria-label="SkillList"] li[aria-label="Skill"]';
   const SUBJECT_NAMES = ['الرياضيات','رياضيات','العلوم','علوم','اللغة العربية','العربية','عربي','اللغة الانجليزية','اللغة الانكليزية','انجليزي','الدراسات الاجتماعية','الاجتماعيات','التربية الاسلامية','الدراسات الاسلامية','الفيزياء','الكيمياء','الاحياء','علوم الحاسوب','الحوسبة','اللغة الفرنسية','mathematics','math','maths','science','arabic','arabic language','english','english language','social studies','islamic education','islamic studies','physics','chemistry','biology','computer science','french'].map(norm);
-  function loginPage() {return all('input[type="password"],form[data-testid*="login" i],form[id*="login" i]').length>0;}
+  function loginPage() {
+    if(readPass?.login!==undefined)return readPass.login;
+    const result=!!first('input[type="password"],form[data-testid*="login" i],form[id*="login" i]');
+    if(readPass)readPass.login=result;
+    return result;
+  }
   function catalogAncestor(node) {return !!node.closest(`${SUBJECT_CARDS},${LESSON_CARDS}`);}
   function coreCatalog() {
+    if(readPass&&Object.hasOwn(readPass,'catalog'))return readPass.catalog;
+    const result=readCoreCatalog();
+    if(readPass)readPass.catalog=result;
+    return result;
+  }
+  function readCoreCatalog() {
     if(loginPage())return null;
     const route=location.hash.startsWith('#/')?location.hash.slice(1):location.pathname+location.search;
     let url;try{url=new URL(route,location.origin);}catch{return null;}
@@ -213,7 +259,11 @@
       error:!!first('[data-testid="assigned-tab-error"],[data-testid="assigned-task-error"]')};
   }
   function uniqueNodes(nodes) {
-    return [...new Set(nodes)].filter(node=>!nodes.some(other=>other!==node && other.contains(node)));
+    const unique=[...new Set(nodes)],members=new Set(unique);
+    return unique.filter(node=>{
+      for(let parent=node.parentElement;parent;parent=parent.parentElement)if(members.has(parent))return false;
+      return true;
+    });
   }
   function titleOf(node,kind) {
     const attrs=kind==='subject'?['data-subject-name','data-name']:['data-lesson-name','data-name'];
@@ -307,8 +357,11 @@
     return [...lessons.values()].map(({node,...item})=>item);
   }
   function learningContext() {
-    return topCourseContext || /\/(?:pathways|lesson|activity|learn|content|assessment|exercise|progress)/i.test(location.pathname+location.hash) ||
+    if(readPass?.learning!==undefined)return readPass.learning;
+    const result=topCourseContext || /\/(?:pathways|lesson|activity|learn|content|assessment|exercise|progress)/i.test(location.pathname+location.hash) ||
       !!first('[data-testid="question-renderer"],[data-testid="adaptive-question-renderer"],[data-alef-instruction],[data-alef-question],[data-alef-completed],[data-testid="content-page"],[data-testid="content-page-body-player"],[data-testid="ncle-activity-page"],ul[aria-label="SkillList"],'+WEAVER_QUESTIONS);
+    if(readPass)readPass.learning=result;
+    return result;
   }
   function actionKind(node) {
     const testId=node.getAttribute('data-testid')||'';
@@ -390,7 +443,8 @@
     return all('[role="status"],[role="alert"],h1,h2').some(el=>!catalogAncestor(el) &&
       /^(اكملت الدرس|اكملت الدرس بنجاح|اكملت الواجب بنجاح|اكتمل الدرس|اكتملت الاسئلة|lesson complete|lesson completed|assessment complete|assessment completed|you completed this lesson|all questions completed)$/.test(norm(text(el))));
   }
-  function inspect() {
+  function inspect() {return withReadPass(inspectPage);}
+  function inspectPage() {
     const listedSubjects=discoverSubjects();
     const listedLessons=discoverLessons();
     const navigation=discoverActions();
@@ -432,9 +486,17 @@
       subjects.set('current',{id:'current',name:'المادة المفتوحة حاليًا',node:null});
       listedSubjects.push({id:'current',name:'المادة المفتوحة حاليًا'});
     }
-    const fingerprint=hash(JSON.stringify([location.pathname,location.search,location.hash,text(first('[data-testid="progress-bar-slide-count"]')),stage,catalog,listedSubjects,listedLessons,question?.id,question?.fingerprint,navigation,completed,loading,frames,text(first('[data-alef-instruction],[data-testid="content-page-body-player"],.instruction,main')).slice(0,3000)]));
+    const progress=text(first('[data-testid="progress-bar-slide-count"]'));
+    const instructionText=text(first('[data-alef-instruction],[data-testid="content-page-body-player"],.instruction,main')).slice(0,3000);
+    const fingerprint=hash(JSON.stringify([location.pathname,location.search,location.hash,progress,stage,catalog,listedSubjects,listedLessons,question?.id,question?.fingerprint,navigation,completed,loading,frames,instructionText]));
+    // Loading flags and temporary enabled/disabled controls are not evidence
+    // that the platform advanced a step. Preserve a separate content identity.
+    const transitionFingerprint=hash(JSON.stringify([location.pathname,location.search,location.hash,progress,stage,
+      catalog&&{type:catalog.type,tab:catalog.tab,filter:catalog.filter,empty:catalog.empty,error:catalog.error},
+      listedSubjects,listedLessons,question?.id,question?.fingerprint,completed,
+      frames.map(({url,origin,kind,role,required,independent})=>({url,origin,kind,role,required,independent})),instructionText]));
     return {ok:true,page:{title:document.title,url:location.href},stage,subjects:listedSubjects,lessons:listedLessons,
-      question,needsPreparation:!!questionState.needsPreparation,feedback:questionState.feedback,completed,canNext:navigation.some(action=>action.kind==='next'),navigation,fingerprint,...(catalog?{catalog}:{}),
+      question,needsPreparation:!!questionState.needsPreparation,feedback:questionState.feedback,completed,canNext:navigation.some(action=>action.kind==='next'),navigation,fingerprint,transitionFingerprint,...(catalog?{catalog}:{}),
       loading,frames,context:{frame:window!==window.top,documentReadyState:document.readyState},
       ...(questionEvidence?{questionEvidence:{...questionEvidence}}:{}),
       diagnostics:[...new Set(diagnostics)],capabilities:{text:true,single:true,multiple:true,images:true,visionCapture:true,dragAndDrop:true,customSelectors:true,courseNavigation:true,frameContext:true}};
@@ -494,7 +556,7 @@
     // Weaver's accessibility label gains “Selected/Correct” after clicking.
     // Authored option content and its option UUID remain stable across renders.
     let label=node.matches('input')?clean([...node.labels||[]].map(text).join(' ')||node.getAttribute('aria-label')||node.value):authored?text(authored):text(node);
-    if(!label&&(visualAll('img,canvas,svg',node).some(visual=>!visual.closest(VISUAL_EXCLUSIONS))||[node,...visualAll('*',node)].some(visual=>/url\(/.test(view(visual).getComputedStyle(visual).backgroundImage))))label=`الخيار المصوّر ${index+1}`;
+    if(!label&&(visualAll('img,canvas,svg',node).some(visual=>!visual.closest(VISUAL_EXCLUSIONS))||[node,...visualAll('*',node)].some(visual=>/url\(/.test(styleOf(visual).backgroundImage))))label=`الخيار المصوّر ${index+1}`;
     const describedId=weaver?node.getAttribute('aria-describedby')?.split(/\s+/).find(id=>/^option-.+-content$/.test(id)):null;
     const id=node.getAttribute('data-alef-option')||control.getAttribute('data-option-id')||control.id||describedId||(control.value&&control.value!=='on'?control.value:'')||`option-${hash(label)}`;
     return {id,text:label,node,control,actual};
@@ -503,24 +565,38 @@
     if(option.actual)return !!option.node.querySelector('.choice.selected,.input-placeholder.selected,.input-placeholder.selected-by-user,.choice-select.selected')||option.node.classList.contains('selected');
     return option.control.matches('input')?option.control.checked:option.control.getAttribute('aria-checked')==='true';
   }
-  const VISUAL_EXCLUSIONS='.mcq-icon-container,.mcq-option-icon-container,.dnd-grip-icon,.katex,math,mjx-container,.MathJax,[data-testid$="question-feedback-container"],[data-testid="custom-feedback-container"],[data-alef-feedback]';
+  const VISUAL_EXCLUSIONS='.mcq-icon-container,.mcq-option-icon-container,.dnd-grip-icon,.katex,math,mjx-container,.MathJax,[data-testid$="question-feedback-container"],[data-testid="custom-feedback-container"],[data-testid="general-answer-feedback"],[data-testid="answerFeedback"],[data-testid="answer-feedback"],[data-testid="wrong-answer-feedback"],[data-testid="correct-answer-feedback"],[data-alef-feedback],[role="status"],[role="alert"],aside,nav,[role="banner"],[role="navigation"]';
   const MAX_VISUALS=3;
   const MAX_VISUAL_BYTES=1_048_576;
   const QUESTION_ROOTS='[data-alef-question],[data-question-id],[data-testid="question-renderer"],[data-testid="new-question-renderer"],'+WEAVER_QUESTIONS;
   function visibleVisual(el) {
-    if(!isElement(el)||!el.isConnected||!el.getClientRects().length)return false;
+    if(!isElement(el)||!el.isConnected)return false;
+    const cached=readPass?.visual.get(el);
+    if(cached!==undefined)return cached;
+    if(!el.getClientRects().length){readPass?.visual.set(el,false);return false;}
     for(let node=el;node;node=node.parentElement||node.getRootNode()?.host) {
-      const style=view(node).getComputedStyle(node);
-      if(node.matches('[hidden],[inert]')||style.display==='none'||['hidden','collapse'].includes(style.visibility))return false;
+      const style=styleOf(node);
+      if(node.matches('[hidden],[inert]')||style.display==='none'||['hidden','collapse'].includes(style.visibility)){
+        readPass?.visual.set(el,false);return false;
+      }
     }
+    readPass?.visual.set(el,true);
     return true;
   }
   const visualAll=(query,scope)=>[...new Set(roots(scope).flatMap(root=>[...root.querySelectorAll(query)]))].filter(visibleVisual);
   function authoredScope(container) {
-    const scope=container.closest('[data-testid="ncle-activity-page-player"],[data-testid="content-page-body-player"],[data-alef-question-scope],.slide-container,[data-testid="slide-container"]');
+    // The assessment micro-app and Weaver's main player also put the actual
+    // stem beside the question widget. Only widen inside an observed player
+    // with one active question, never into the top-level course/account body.
+    const scope=container.closest(PLAYER_SCOPES+',main#player-container,[data-alef-question-scope],.slide-container,[data-testid="slide-container"]')||
+      (topCourseContext?container.closest('main,[role="main"]'):null);
     if(!scope||scope===container)return container;
     const questions=uniqueNodes(all(QUESTION_ROOTS,scope));
-    return questions.length===1&&questions[0]===container?scope:container;
+    if(questions.length)return questions.length===1&&questions[0]===container?scope:container;
+    // A native/semantic choice group can be the active question without one of
+    // the authored widget markers. Keep the same single-group boundary.
+    const groups=uniqueNodes(all('fieldset,[role="radiogroup"],[role="group"][aria-labelledby],[role="selectgroup"][aria-labelledby]',scope));
+    return groups.length===1&&groups[0]===container?scope:container;
   }
   function visualNodes(container) {
     const scope=authoredScope(container),found=[],seen=new Set();
@@ -553,7 +629,7 @@
       if(node.closest(VISUAL_EXCLUSIONS)||node.closest('svg')||node.matches('img,canvas'))continue;
       const box=node.getBoundingClientRect();
       if(box.width<40||box.height<40)continue;
-      const background=view(node).getComputedStyle(node).backgroundImage;
+      const background=styleOf(node).backgroundImage;
       for(const match of background.matchAll(/url\(\s*(?:"([^"]*)"|'([^']*)'|([^)]*))\s*\)/g)) {
         add(node,'background',match[1]||match[2]||match[3]?.trim()||'');
       }
@@ -657,13 +733,12 @@
     }
     return {ok:true,questionId:question.id,questionFingerprint:question.fingerprint,requiresVision:question.requiresVision,images};
   }
-  function promptText(container) {
-    // The short prompt often only says “Select the correct answer.” The actual
-    // expression/passage can be a sibling, so read the full authored body once.
-    // Legacy renderers append result feedback beside their authored question.
-    // Keep that sibling out of the prompt without dropping the actual stem.
-    const authored=container.matches('[data-testid="question-renderer"]')
-      ? first('[data-testid^="question-renderer-"]',container)||container : container;
+  const PROMPT_CONTEXT='[data-alef-question-context],[data-testid="question-statement-container"],.question-statement-container';
+  const CONTEXT_CHROME='aside,nav,button,[role="button"],input,textarea,select,[role="banner"],[role="navigation"],[data-testid="ncle-main-contents"],[data-testid="ncle-sidebar"],[data-testid="progress-bar-slide-count"],[role="progressbar"]';
+  const PROMPT_FEEDBACK='[data-testid="general-answer-feedback"],[data-testid="answerFeedback"],[data-testid="answer-feedback"],[data-testid="correct-answer-feedback"],[data-alef-feedback],[data-testid="wrong-answer-feedback"],[data-testid$="question-feedback-container"],[data-testid="custom-feedback-container"],[role="status"],[role="alert"]';
+  function promptBody(authored,{context=false}={}) {
+    if(authored.nodeType===3)return visible(authored.parentElement)?clean(authored.textContent):'';
+    if(authored.matches(PROMPT_FEEDBACK)||context&&authored.matches(CONTEXT_CHROME))return '';
     const copy=authored.cloneNode(true);
     // Detached clones lose computed styles. Carry visibility from the live
     // question before removing options, so hidden distractor text cannot turn
@@ -672,24 +747,63 @@
     const originalNodes=[...authored.querySelectorAll('*')],copiedNodes=[...copy.querySelectorAll('*')];
     originalNodes.forEach((node,index)=>{
       if(node.parentElement?.closest('.katex,math,mjx-container'))return;
-      const style=view(node).getComputedStyle(node);
+      const style=styleOf(node);
       if(style.display==='none'||['hidden','collapse'].includes(style.visibility))copiedNodes[index].setAttribute('hidden','');
     });
     copy.querySelectorAll('.dropdown-input-field-container,[data-testid="selectableChoice"],select,[role="combobox"]').forEach(node=>node.replaceWith(' [قائمة الإجابة] '));
     copy.querySelectorAll('.dnd-droppable[id^="droppable-"][data-index]').forEach(node=>node.replaceWith(' [blank:'+node.getAttribute('data-index')+'] '));
     copy.querySelectorAll('.dnd-options-draggable,.dnd-options-draggable-overlay,.dnd-overlay').forEach(node=>node.remove());
     copy.querySelectorAll('[data-testid^="fill-blank-dd-"]').forEach(node=>node.replaceWith(' [blank:'+node.getAttribute('data-testid').slice(14)+'] '));
-    copy.querySelectorAll('[data-testid="draggableChoice"],[data-testid="choice-item-dd"],[data-testid="general-answer-feedback"],[data-testid="answerFeedback"],[data-testid="question-passage-content"],[data-alef-passage],[data-alef-feedback],[data-testid="wrong-answer-feedback"],[data-testid$="question-feedback-container"],[data-testid="custom-feedback-container"],[role="status"],[role="alert"]').forEach(node=>node.remove());
+    copy.querySelectorAll('[data-testid="draggableChoice"],[data-testid="choice-item-dd"],[data-testid="general-answer-feedback"],[data-testid="answerFeedback"],[data-testid="answer-feedback"],[data-testid="correct-answer-feedback"],[data-alef-feedback],[data-testid="wrong-answer-feedback"],[data-testid$="question-feedback-container"],[data-testid="custom-feedback-container"],[role="status"],[role="alert"]').forEach(node=>node.remove());
     copy.querySelectorAll('button,input,textarea,[data-alef-option],[data-testid="choice-item"],[role="radio"],[role="checkbox"],label,[data-testid="matching-choices"],[data-testid="matching-answers"],[data-testid^="matching-choice-"],[data-testid^="matching-answer-"],[data-alef-item],[data-alef-target],[role="listbox"],[class*="react-select"],[hidden],[aria-hidden="true"],script,style').forEach(node=>node.remove());
+    if(context)copy.querySelectorAll(CONTEXT_CHROME).forEach(node=>node.remove());
     // A detached copy has no layout-derived innerText line breaks. Preserve
     // boundaries between instruction, stem and math instead of joining words.
     copy.querySelectorAll('div,p,section,h1,h2,h3,h4,li,br').forEach(node=>{node.prepend(' ');node.append(' ');});
-    let value=text(copy);
-    if(!value&&container.getAttribute('aria-labelledby'))value=clean(container.getAttribute('aria-labelledby').split(/\s+/).map(id=>text(container.ownerDocument.getElementById(id))).join(' '));
-    const passage=text(first('[data-testid="question-passage-content"],[data-alef-passage]',container));
-    const context=all('[data-alef-question-context],[data-testid="question-statement-container"],.question-statement-container',authoredScope(container)).filter(node=>!container.contains(node)&&!node.contains(container));
-    const extra=uniqueNodes(context).map(text).filter(Boolean).join(' ');
-    return clean((extra?extra+' ':'')+(passage?passage+' ':'')+value);
+    return text(copy);
+  }
+  function questionReferences(container) {
+    const providers=[container,...all('[role="radiogroup"],[role="selectgroup"],fieldset,[role="group"][aria-labelledby]',container)];
+    const found=[];
+    for(const provider of providers)for(const name of ['aria-describedby','aria-labelledby']) {
+      for(const id of (provider.getAttribute(name)||'').split(/\s+/).filter(Boolean)) {
+        const node=provider.getRootNode().getElementById?.(id);
+        if(!node||!visible(node)||node===container||node.contains(container)||node.closest(CONTEXT_CHROME+','+PROMPT_FEEDBACK))continue;
+        const owner=node.closest(QUESTION_ROOTS);
+        if(owner&&owner!==container&&!container.contains(owner))continue;
+        found.push(node);
+      }
+    }
+    return uniqueNodes(found);
+  }
+  function promptText(container) {
+    // A short selection instruction is not the stem. Read preceding authored
+    // content in the single-question player, and explicitly associated content
+    // even when CSS places it after the answer widget. Following unassociated
+    // siblings are excluded: legacy renderers append untagged result feedback.
+    const authored=container.matches('[data-testid="question-renderer"]')
+      ? first('[data-testid^="question-renderer-"]',container)||container : container;
+    const scope=authoredScope(container),preceding=[];
+    if(scope.contains(authored)) {
+      for(let node=authored;node&&node!==scope;node=node.parentElement) {
+        const siblings=[];
+        for(let sibling=node.previousSibling;sibling;sibling=sibling.previousSibling) {
+          if(sibling.nodeType===3||isElement(sibling)&&visible(sibling))siblings.unshift(sibling);
+        }
+        preceding.unshift(...siblings);
+      }
+    }
+    const pieces=preceding.map(node=>promptBody(node,{context:true})).filter(Boolean);
+    const value=promptBody(authored);if(value)pieces.push(value);
+    const referenced=[...questionReferences(container),...all(PROMPT_CONTEXT,scope).filter(node=>!authored.contains(node)&&!node.contains(container))];
+    for(const node of uniqueNodes(referenced)) {
+      const extra=promptBody(node,{context:true});
+      if(extra&&!pieces.some(piece=>piece.includes(extra)))pieces.push(extra);
+    }
+    return clean(pieces.join(' '));
+  }
+  function genericInstructionOnly(value) {
+    return /^(?:select the correct answers?|choose the correct answers?|select all that apply|choose all correct answers|select one answer|answer the question|write your answer|enter your answer|complete the answer|اختر الاجابة الصحيحة|اختر الاجابات الصحيحة|حدد الاجابة الصحيحة|اختر الاجابة المناسبة|اختر الاجابة|اكمل الاجابة|اكتب الاجابة|اكتب اجابتك|اجب عن السؤال|اختر من القائمة)$/.test(norm(value));
   }
   function matchingControls(container) {
     if(container.matches('.dnd-container.question-widget')){
@@ -728,7 +842,8 @@
     const attempts=all('div[data-testid^="attempt-"]',container);const active=attempts.at(-1)||container;
     return retry||(!button('next')&&!!first('[data-testid="wrong-answer-feedback"],[data-alef-feedback="wrong"]',active))?'wrong':null;
   }
-  function readQuestion() {
+  function readQuestion() {return withReadPass(readQuestionPage);}
+  function readQuestionPage() {
     if(completionVisible())return {ok:true,question:null,completed:true,canNext:false};
     const container=questionContainer();
     if(!container)return {ok:true,question:null,completed:false,canNext:!!button('next')};
@@ -762,6 +877,7 @@
     }
     if(!prompt&&visuals.length)prompt='اقرأ السؤال الظاهر في الصور المرفقة، ثم أجب اعتمادًا على بياناتها.';
     if(!prompt)throw new Error('لم يظهر نص السؤال بوضوح.');
+    if(type!=='matching'&&!visuals.length&&genericInstructionOnly(prompt))throw new Error('لم يُقرأ نص المسألة؛ ظهرت تعليمات اختيار الإجابة فقط. لم يُرسل سؤال ناقص للنموذج؛ صدّر فحص الصفحة لتحديد موضع النص.');
     if(options.some(option=>!option.text)||new Set(options.map(option=>option.id)).size!==options.length)throw new Error('خيارات الإجابة غير واضحة أو متكررة.');
     const fingerprint=hash(JSON.stringify([prompt,type,options,extra,visuals,text(first('[data-testid="progress-bar-slide-count"]'))]));
     const code=first('[data-testid^="question-renderer-"]',container)?.getAttribute('data-testid');
@@ -909,7 +1025,9 @@
     return submitAnswer(question,message);
   }
   function diagnostics(){
+    const started=performance.now();
     const snapshot=inspect();
+    const inspectionDurationMs=Math.round(performance.now()-started);
     const cleanUrl=value=>{try{const url=new URL(value,location.href);return url.origin+url.pathname+(url.hash.startsWith('#/')?url.hash.split('?')[0]:'');}catch{return '';}};
     const login=loginPage();
     const inPlayer=node=>!!node.closest(PLAYER_SCOPES)||topCourseContext&&!login;
@@ -917,7 +1035,14 @@
     const controls=all('button,[role="button"],[role="radio"],[role="checkbox"],[role="radiogroup"],[role="combobox"],[data-testid]')
       .filter(node=>safeForm(node)&&!node.matches('input,textarea')).sort((a,b)=>Number(inPlayer(b))-Number(inPlayer(a)));
     const choices=all('input[type="radio"],input[type="checkbox"],[role="radio"],[role="checkbox"]').filter(node=>inPlayer(node)&&safeForm(node));
-    return {ok:true,diagnostics:{version:'0.5.3',page:{url:cleanUrl(location.href)},stage:snapshot.stage,
+    // Structure and timing help distinguish an empty app mount from an
+    // unsupported question without exporting account text or input values.
+    const rendering={readyState:document.readyState,visibilityState:document.visibilityState,
+      bodyChildren:document.body?.childElementCount||0,inspectionDurationMs,
+      appRoots:[...document.querySelectorAll('#root,#app,app-root,[data-reactroot],main')].slice(0,8).map(node=>({
+        tag:node.tagName,kind:node.matches('#root')?'root':node.matches('#app')?'app':node.matches('main')?'main':'app-root',
+        children:node.childElementCount,visible:visible(node)}))};
+    return {ok:true,diagnostics:{version:'0.5.4',page:{url:cleanUrl(location.href)},stage:snapshot.stage,rendering,
       subjects:snapshot.subjects,lessons:snapshot.lessons.map(({href,...lesson})=>({...lesson,href:href?cleanUrl(href):undefined})),
       navigation:snapshot.navigation,issues:snapshot.diagnostics,frames:snapshot.frames,loading:snapshot.loading,
       ...(snapshot.questionEvidence?{questionEvidence:snapshot.questionEvidence}:{}),
@@ -931,7 +1056,7 @@
         label:node.matches('button,[role="button"]')?clean(text(node)||node.getAttribute('aria-label')).slice(0,100):''}))}};
   }
   function handle(message){
-    rootsCache=null;frameEntries=new Map();questionEvidence=null;topCourseContext=message.topCourseContext===true;settings(message.selectors);
+    frameEntries=new Map();questionEvidence=null;topCourseContext=message.topCourseContext===true;settings(message.selectors);
     switch(message.type){
       case 'ALEF_SCAN':case 'ALEF_INSPECT':return inspect();
       case 'ALEF_DIAGNOSTICS':return diagnostics();

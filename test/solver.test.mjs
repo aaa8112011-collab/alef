@@ -161,7 +161,11 @@ test('local Ollama uses the native non-streaming JSON protocol without an API ke
   assert.equal(requests[0].headers.Authorization, undefined);
   assert.equal(requests[0].body.model, 'qwen3:8b');
   assert.equal(requests[0].body.stream, false);
-  assert.equal(requests[0].body.format, 'json');
+  assert.equal(requests[0].body.format.type, 'object');
+  assert.deepEqual(requests[0].body.format.properties.optionIds.items.enum, ['a','b']);
+  assert.equal(requests[0].body.format.properties.optionIds.minItems, 0);
+  assert.equal(requests[0].body.format.properties.optionIds.maxItems, 1);
+  assert.deepEqual(requests[1].body.format, requests[0].body.format);
   assert.equal(requests[0].body.think, false);
   assert.equal(requests[0].body.keep_alive, '15m');
   assert.deepEqual(requests[0].body.options, { temperature: 0, num_predict: 512, num_ctx: 8192 });
@@ -305,7 +309,9 @@ test('Arabic and English diagrams route to a verified vision-capable model with 
       assert.deepEqual(body.messages[1].images,[visualPng]);assert.equal(headers.Authorization,undefined);
       assert.equal(JSON.parse(body.messages[1].content).question.text,text);
       assert.equal(body.messages[1].content.includes(visualPng),false,'Image bytes must not be represented as pretend readable text.');
+      assert.deepEqual(body.format.properties.optionIds.items.enum,input.question.options.map(option=>option.id));
     }
+    assert.deepEqual(chats[1].body.format,chats[0].body.format,'Both independent vision passes use the same original-ID constraint.');
     assert.equal(chats[1].body.messages.length,2,'Verification must inspect original images without the first answer.');
   }
 });
@@ -369,4 +375,108 @@ test('text-only dilation problems with complete corresponding coordinates are no
     const result=await solveQuestion({...input,verify:false,question:{...input.question,text}},localConfig(async()=>{calls++;return localResponse(answer);}));
     assert.equal(calls,1);assert.equal(result.needsReview,false);
   }
+});
+
+test('local choice schemas permit original IDs and abstention without forcing a choice or copying option labels',async()=>{
+  const question={id:'original-ids',text:'Select the scale factor.',type:'single',options:[
+    {id:'answer-550e8400-e29b-41d4-a716-446655440000',text:'1.5'},
+    {id:'answer-550e8400-e29b-41d4-a716-446655440001',text:'2'},
+  ]};
+  const requests=[];
+  const result=await solveQuestion({...input,question,verify:false},localConfig(async(_url,request)=>{
+    requests.push(JSON.parse(request.body));
+    return localResponse({...answer,optionIds:[question.options[0].id],text:''});
+  }));
+  assert.equal(requests.length,1,'The schema must not add a model request or a repair loop.');
+  const schema=requests[0].format;
+  assert.equal(schema.type,'object');assert.equal(schema.additionalProperties,false);
+  assert.deepEqual(new Set(schema.required),new Set(['optionIds','text','explanation','confidence']));
+  assert.deepEqual(schema.properties.optionIds.items.enum,question.options.map(option=>option.id));
+  assert.equal(schema.properties.optionIds.minItems,0,'Empty-array abstention must remain decodable.');
+  assert.equal(schema.properties.optionIds.maxItems,1);
+  assert.equal(schema.properties.confidence.minimum,0,'The decoder must not force a high confidence.');
+  assert.equal(schema.properties.confidence.maximum,1);
+  assert.deepEqual(result.answer.optionIds,[question.options[0].id]);
+  assert.equal(result.needsReview,false);
+});
+
+test('local responses that ignore the original-ID schema are never remapped from labels, positions or duplicate IDs',async()=>{
+  const question={id:'no-id-guessing',text:'Select the scale factor.',type:'single',options:[
+    {id:'original-first',text:'1.5'},{id:'original-second',text:'2'},
+  ]};
+  for(const optionIds of [[],['1.5'],['0'],['A'],['unknown'],['original-first','original-first'],['original-first','original-second']]) {
+    let calls=0;
+    const result=await solveQuestion({...input,question,verify:true},localConfig(async()=>{
+      calls++;return localResponse({...answer,optionIds,text:'1.5',confidence:.99});
+    }));
+    assert.equal(calls,1,'An invalid response must stop without verification or an unbounded repair request.');
+    assert.equal(result.reason,'invalid_selection',JSON.stringify(optionIds));
+    assert.equal(result.needsReview,true);assert.equal(result.verified,false);
+    assert.deepEqual(result.answer.optionIds,[]);
+  }
+});
+
+test('local multiple-choice schemas retain the exact selection set and runtime uniqueness checks',async()=>{
+  const question={id:'multiple-contract',text:'Select all prime numbers.',type:'multiple',options:[
+    {id:'prime-two',text:'2'},{id:'prime-three',text:'3'},{id:'composite-four',text:'4'},
+  ]};
+  const requests=[];
+  const result=await solveQuestion({...input,question},localConfig(async(_url,request)=>{
+    requests.push(JSON.parse(request.body));
+    return localResponse({...answer,optionIds:requests.length===1?['prime-two','prime-three']:['prime-three','prime-two']});
+  }));
+  assert.equal(result.verified,true);
+  for(const request of requests) {
+    assert.deepEqual(request.format.properties.optionIds.items.enum,question.options.map(option=>option.id));
+    assert.equal(request.format.properties.optionIds.minItems,0);
+    assert.equal(request.format.properties.optionIds.maxItems,3);
+  }
+  const duplicate=await solveQuestion({...input,question},localConfig(async()=>localResponse({...answer,optionIds:['prime-two','prime-two']})));
+  assert.equal(duplicate.reason,'invalid_selection');assert.equal(duplicate.needsReview,true);
+});
+
+test('local text and matching schemas use empty option arrays and keep matching identities constrained without forcing completion',async()=>{
+  let textRequest;
+  const text=await solveQuestion({...input,verify:false,question:{id:'schema-text',text:'Name a color.',type:'text',options:[]}},localConfig(async(_url,request)=>{
+    textRequest=JSON.parse(request.body);return localResponse({...answer,optionIds:[],text:'أزرق'});
+  }));
+  assert.equal(text.answer.text,'أزرق');
+  assert.equal(textRequest.format.properties.optionIds.maxItems,0);
+  assert.equal(textRequest.format.properties.optionIds.items.enum,undefined,'An empty JSON Schema enum would be invalid.');
+  assert.equal(textRequest.format.properties.text.const,undefined);
+  let matchingRequest;
+  const matching=await solveQuestion({...matchingInput,verify:false},localConfig(async(_url,request)=>{
+    matchingRequest=JSON.parse(request.body);return localResponse(matchingAnswer);
+  }));
+  assert.equal(matching.needsReview,false);
+  const schema=matchingRequest.format;
+  assert.equal(schema.properties.optionIds.maxItems,0);
+  assert.equal(schema.properties.optionIds.items.enum,undefined);
+  assert.equal(schema.properties.matches.minItems,0);
+  assert.equal(schema.properties.matches.maxItems,matchingInput.question.items.length);
+  assert.deepEqual(schema.properties.matches.items.properties.itemId.enum,matchingInput.question.items.map(item=>item.id));
+  assert.deepEqual(schema.properties.matches.items.properties.targetId.enum,matchingInput.question.targets.map(target=>target.id));
+  for(const matches of [[],[{itemId:'i1',targetId:'t1'}],[{itemId:'i1',targetId:'t1'},{itemId:'i2',targetId:'t1'}]]) {
+    const incomplete=await solveQuestion({...matchingInput,verify:false},localConfig(async()=>localResponse({...matchingAnswer,matches})));
+    assert.equal(incomplete.reason,'invalid_selection');assert.equal(incomplete.needsReview,true);
+  }
+});
+
+
+test('low-confidence empty choice selections preserve abstention without claiming invalid IDs or sending a second solution',async()=>{
+  for(const type of ['single','multiple']) {
+    let calls=0;
+    const result=await solveQuestion({...input,question:{...input.question,type}},localConfig(async()=>{
+      calls++;return localResponse({...answer,optionIds:[],text:'',explanation:'لم تتضح بيانات الرسم بما يكفي للاختيار.',confidence:.4});
+    }));
+    assert.equal(calls,1);assert.equal(result.needsReview,true);assert.equal(result.verified,false);
+    assert.equal(result.reason,'low_confidence');assert.deepEqual(result.answer.optionIds,[]);
+    assert.match(result.answer.explanation,/لم تتضح/);
+  }
+  const invalid=await solveQuestion(input,localConfig(async()=>localResponse({...answer,optionIds:['not-an-original-ID'],confidence:.4})));
+  assert.equal(invalid.reason,'invalid_selection','Low confidence cannot authorize foreign IDs.');
+  let calls=0;
+  const verifier=await solveQuestion(input,localConfig(async()=>localResponse(++calls===1?answer:{...answer,optionIds:[],confidence:.4})));
+  assert.equal(calls,2);assert.equal(verifier.needsReview,true);assert.equal(verifier.verified,false);
+  assert.equal(verifier.reason,'verification_disagreement');
 });

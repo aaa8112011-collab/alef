@@ -326,7 +326,7 @@ async function exportDiagnostics() {
     const link=document.createElement('a');link.href=url;link.download='alef-page-scan.json';
     document.body.append(link);link.click();link.remove();
     setTimeout(()=>URL.revokeObjectURL(url),10000);
-    notice('حُفظ ملف فحص الصفحة محليًا. راجع محتواه قبل مشاركته؛ لا يحتوي على رمز ربط الخادم.');
+    notice('حُفظ فحص الصفحة محليًا، ويشمل نص آخر سؤال وخياراته وسبب التوقف. راجعه قبل مشاركته؛ لا يتضمن رمز الربط أو صور الأسئلة.');
   }catch(error){notice(error.message,true);}
 }
 function checkedUrl(value) {
@@ -347,12 +347,13 @@ async function checkServer() {
     if(!response.ok) throw new Error('الخادم رفض الاتصال.');
     const health=await response.json();
     if(health.ok!==true) throw new Error('هذا العنوان لا يخص خادم مُعين.');
+    if(!Number.isFinite(Number(health.protocolVersion))||Number(health.protocolVersion)<3) {
+      throw new Error('الخادم المحلي يعمل بنسخة قديمة. حدّث المشروع كاملًا (الخادم والإضافة)، ثم أغلق نافذة التشغيل القديمة وشغّل START-WINDOWS.cmd من النسخة الجديدة وأعد فحص الاتصال.');
+    }
     const local = health.provider === 'ollama';
     const ready = health.configured === true && (!local || health.modelReady === true);
     $('server-status').textContent=ready
-      ? local ? Number(health.protocolVersion)<2||!Number.isFinite(Number(health.protocolVersion))
-        ? `متصل للنصوص عبر ${health.model}؛ حدّث ملفات الخادم وشغّل START-WINDOWS.cmd من النسخة الجديدة لتجهيز قراءة الصور والدقة الأعلى.`
-        : health.visionReady===true
+      ? local ? health.visionReady===true
         ? `متصل محليًا · النصوص: ${health.model} · الصور: ${health.visionModel} · دون مفتاح API`
         : health.visionReady===false
           ? `متصل للنصوص عبر ${health.model}؛ الصور غير جاهزة. ${health.visionMessage||`النموذج البصري ${health.visionModel||''} يحتاج تجهيزًا.`} شغّل START-WINDOWS.cmd من النسخة الجديدة ثم أعد الفحص.`

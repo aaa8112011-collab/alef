@@ -530,7 +530,7 @@ test('server check shows local model readiness without paid credentials and prec
   const harness=await dashboardHarness();
   try{
     const {page}=harness;
-    let health={ok:true,protocolVersion:2,configured:true,provider:'ollama',model:'qwen3:8b',modelReady:true,visionModel:'qwen3-vl:8b',visionInstalled:true,visionReady:true};
+    let health={ok:true,protocolVersion:3,configured:true,provider:'ollama',model:'qwen3:8b',modelReady:true,visionModel:'qwen3-vl:8b',visionInstalled:true,visionReady:true};
     let requests=0;
     await page.route('http://127.0.0.1:4318/api/health',async route=>{
       requests++;
@@ -543,7 +543,13 @@ test('server check shows local model readiness without paid credentials and prec
     assert.ok((await page.locator('#server-status').textContent()).includes('متصل محليًا'));
     assert.ok((await page.locator('#server-status').textContent()).includes('الصور: qwen3-vl:8b'));
     assert.ok((await page.locator('#server-status').textContent()).includes('دون مفتاح API'));
-    health={ok:true,protocolVersion:2,configured:true,provider:'ollama',model:'qwen3:8b',modelReady:true,visionModel:'qwen3-vl:8b',visionInstalled:false,visionReady:false,visionIssue:'vision_model_not_found',visionMessage:'النموذج البصري غير مثبت.'};
+    health={...health,protocolVersion:2};
+    await page.locator('#check-server').click();
+    await page.waitForFunction(()=>document.querySelector('#server-status').textContent.includes('حدّث المشروع كاملًا'));
+    const oldStatus=await page.locator('#server-status').textContent();
+    assert.match(oldStatus,/الخادم والإضافة/);assert.match(oldStatus,/أغلق نافذة التشغيل القديمة/);assert.match(oldStatus,/START-WINDOWS.cmd من النسخة الجديدة/);
+    assert.doesNotMatch(oldStatus,/متصل/,'A protocol 2 server cannot be presented as connected or ready for the fixed choice mapping');
+    health={ok:true,protocolVersion:3,configured:true,provider:'ollama',model:'qwen3:8b',modelReady:true,visionModel:'qwen3-vl:8b',visionInstalled:false,visionReady:false,visionIssue:'vision_model_not_found',visionMessage:'النموذج البصري غير مثبت.'};
     await page.locator('#check-server').click();
     await page.waitForFunction(()=>document.querySelector('#server-status').textContent.includes('الصور غير جاهزة'));
     assert.ok((await page.locator('#server-status').textContent()).includes('متصل للنصوص'));
@@ -555,17 +561,17 @@ test('server check shows local model readiness without paid credentials and prec
     assert.equal((await page.locator('#server-status').textContent()).includes('متصل محليًا'),false,'Text readiness alone cannot imply image readiness');
     health={ok:true,configured:true,provider:'ollama',model:'qwen3:8b',modelReady:true};
     await page.locator('#check-server').click();
-    await page.waitForFunction(()=>document.querySelector('#server-status').textContent.includes('حدّث ملفات الخادم'));
-    health={ok:true,configured:false,provider:'ollama',model:'qwen3:8b',modelReady:false,issue:'model_missing',message:'النموذج qwen3:8b غير موجود. حمّله باستخدام ollama pull qwen3:8b.'};
+    await page.waitForFunction(()=>document.querySelector('#server-status').textContent.includes('حدّث المشروع كاملًا'));
+    health={ok:true,protocolVersion:3,configured:false,provider:'ollama',model:'qwen3:8b',modelReady:false,issue:'model_missing',message:'النموذج qwen3:8b غير موجود. حمّله باستخدام ollama pull qwen3:8b.'};
     await page.locator('#check-server').click();
     await page.waitForFunction(()=>document.querySelector('#server-status').textContent.includes('غير موجود'));
     assert.equal(await page.locator('#server-status').textContent(),health.message);
-    health={ok:true,configured:false,provider:'ollama',model:'qwen3:8b',modelReady:false,issue:'runtime_unavailable',message:'تعذر الاتصال بـ Ollama. افتح Ollama ثم أعد الفحص.'};
+    health={ok:true,protocolVersion:3,configured:false,provider:'ollama',model:'qwen3:8b',modelReady:false,issue:'runtime_unavailable',message:'تعذر الاتصال بـ Ollama. افتح Ollama ثم أعد الفحص.'};
     await page.locator('#check-server').click();
     await page.waitForFunction(()=>document.querySelector('#server-status').textContent.includes('افتح Ollama'));
     assert.equal(await page.locator('#server-status').textContent(),health.message);
     assert.equal((await page.locator('#server-status').textContent()).includes('SOLVER_API_KEY'),false);
-    assert.equal(requests,6);
+    assert.equal(requests,7);
     assert.deepEqual(harness.errors,[]);
   }finally{await harness.close();}
 });

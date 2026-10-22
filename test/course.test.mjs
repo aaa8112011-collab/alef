@@ -51,7 +51,7 @@ async function bridge(h,fetchImpl){
     tabs:{get:async()=>({id:1,url:h.page.url()}),sendMessage:async(_id,message)=>h.send(message),create:async()=>{},onRemoved:{addListener(){}},update:async(_id,update)=>{await h.page.goto(update.url);await h.inject();return{id:1,url:h.page.url()};}},
     scripting:{executeScript:async()=>{await h.inject();}},action:{onClicked:{addListener(){}}},
   };
-  vm.runInNewContext(source,{chrome,URL,AbortController,AbortSignal,DOMException,setTimeout,clearTimeout,setInterval,clearInterval,fetch:(url,options)=>url.endsWith('/api/health')?Response.json({ok:true,configured:true,provider:'ollama',modelReady:true,protocolVersion:2,visionReady:true}):fetchImpl(url,options)},{filename:'background-course-test.js'});
+  vm.runInNewContext(source,{chrome,URL,AbortController,AbortSignal,DOMException,setTimeout,clearTimeout,setInterval,clearInterval,fetch:(url,options)=>url.endsWith('/api/health')?Response.json({ok:true,configured:true,provider:'ollama',modelReady:true,protocolVersion:3,visionReady:true}):fetchImpl(url,options)},{filename:'background-course-test.js'});
   const worker={events,send:message=>new Promise((resolve,reject)=>{
     const accepted=handler({tabId:1,...message},{id:'course-test-extension',url:'chrome-extension://course-test-extension/dashboard.html'},resolve);
     if(!accepted)reject(new Error('Worker refused '+message.type));

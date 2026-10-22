@@ -253,7 +253,7 @@ async function inspect(tabId,config,origin,signal) {
         const nested=(child.frames||[]).filter(item=>item.required===true);
         for(const inner of nested)pending.push({frame:inner,parentId:record.frameId,depth:depth+1});
         if(child.question||child.needsPreparation||child.completed||['complete','question'].includes(child.stage)||
-          child.stage==='instruction'&&((child.navigation||[]).length||child.loading)) {
+          child.stage==='instruction'&&((child.navigation||[]).some(action=>action.kind!=='back')||child.loading)) {
           candidates.push({frameId:record.frameId,snapshot:child});
         }
       }catch(error) {
@@ -391,13 +391,16 @@ async function validateQuestionContext(tabId,question,context,config,origin,sign
     throw Object.assign(new Error('تغير السؤال الظاهر أثناء الحل. لم تُطبّق الإجابة السابقة.'),{fatal:true});
   }
 }
-async function waitSnapshot(tabId,config,origin,signal,predicate=()=>true,timeout=12000) {
+async function waitSnapshot(tabId,config,origin,signal,predicate=()=>true,timeout=12000,{loadingTimeout=timeout}={}) {
   const started = Date.now();
-  let last;
-  while (Date.now()-started < timeout) {
+  let last,budget=timeout;
+  while (Date.now()-started < budget) {
     assertActive(signal);
     try {
       last = await inspect(tabId,config,origin,signal);
+      // A player may mount its loading frame after an initially empty shell.
+      // Promote the original deadline once; never restart it on later changes.
+      if(last.loading===true||last.framePending===true)budget=Math.max(budget,loadingTimeout);
       if (predicate(last)) return last;
     } catch (error) {
       if (signal.aborted) throw aborted();
@@ -504,6 +507,9 @@ async function checkLocalService(config,signal) {
   if(!response.ok||health?.ok!==true||!['ollama','openai'].includes(health.provider)) {
     throw new Error('العنوان المحلي لا يخص خادم مُعين جاهزًا. شغّل START-WINDOWS.cmd ثم أعد فحص الاتصال.');
   }
+  if(!(Number(health.protocolVersion)>=3)) {
+    throw new Error('ملفات الخادم قديمة ولا تدعم إصلاح مطابقة الخيارات. أغلق نافذة START القديمة، وحدّث المشروع كاملًا بما فيه مجلد server، ثم شغّل START-WINDOWS.cmd من المشروع المحدّث.');
+  }
   if(health.configured!==true||health.provider==='ollama'&&health.modelReady!==true) {
     throw new Error(typeof health.message==='string'&&health.message.trim()?health.message:
       'الخادم يعمل لكن النموذج غير جاهز. شغّل START-WINDOWS.cmd واتركه حتى يكتمل التجهيز ثم أعد فحص الاتصال.');
@@ -519,8 +525,8 @@ async function checkAccuracyBackend(config,signal,requiresVision) {
       if(signal.aborted)throw aborted();
       throw new Error('تعذر فحص خادم الدقة. شغّل START-WINDOWS.cmd من النسخة الجديدة ثم أعد البدء.');
     }
-    if(!health?.ok || !(health.protocolVersion>=2)) {
-      throw new Error('الخادم يعمل بنسخة قديمة لا تدعم الصور ووضع الدقة. أغلق نافذة التشغيل القديمة وشغّل START-WINDOWS.cmd من النسخة الجديدة.');
+    if(!health?.ok || !(health.protocolVersion>=3)) {
+      throw new Error('الخادم يعمل بنسخة قديمة لا تدعم إصلاح الخيارات الحالي. أغلق نافذة التشغيل القديمة وحدّث المشروع كاملًا ثم شغّل START-WINDOWS.cmd من النسخة الجديدة.');
     }
     config.backendHealth=health;
   }
@@ -580,17 +586,22 @@ async function runLesson(tabId,subject,initial,lesson,config,origin,signal,state
     const blocked=blockedLessonMessage(snapshot);
     if(blocked)return {review:true,blocking:true,snapshot,cause:'lesson_locked',message:blocked};
     if(pendingLessonPlayer(snapshot,config)) {
-      const explicitLoading=snapshot.loading===true||snapshot.framePending===true;
+      let explicitLoading=snapshot.loading===true||snapshot.framePending===true;
       const timeout=explicitLoading?30000:12000;
       await emit(tabId,'status',explicitLoading?'انتظار اكتمال تحميل محتوى الدرس…':
         'انتظار ظهور السؤال أو أدوات متابعة الدرس…',{phase:explicitLoading?'loading':'waiting_controls'});
-      snapshot=await waitSnapshot(tabId,config,origin,signal,item=>item.permissionRequired||
-        blockedLessonMessage(item)||!pendingLessonPlayer(item,config)&&!['unknown','subjects'].includes(item.stage),timeout);
+      snapshot=await waitSnapshot(tabId,config,origin,signal,item=>{
+        explicitLoading ||= item.loading===true||item.framePending===true;
+        return item.permissionRequired||blockedLessonMessage(item)||
+          !pendingLessonPlayer(item,config)&&!['unknown','subjects'].includes(item.stage);
+      },timeout,{loadingTimeout:30000});
       if(snapshot.permissionRequired||blockedLessonMessage(snapshot))continue;
       if(pendingLessonPlayer(snapshot,config)||['unknown','subjects'].includes(snapshot.stage)) {
+        const timeoutMessage=explicitLoading?'لم يكتمل تحميل محتوى الدرس خلال 30 ثانية. توقف التشغيل في الدرس الحالي؛ انتظر ظهوره ثم أعد المحاولة.':
+          'تعذّرت قراءة السؤال أو العثور على زر متابعة مفعّل خلال 12 ثانية. بقي التشغيل على الدرس الحالي؛ صدّر فحص الصفحة لتحديد عناصره.';
+        const issue=diagnostic(snapshot,'');
         return {review:true,blocking:true,snapshot,
-          message:explicitLoading?'لم يكتمل تحميل محتوى الدرس خلال 30 ثانية. توقف التشغيل في الدرس الحالي؛ انتظر ظهوره ثم أعد المحاولة.':
-            'تعذّرت قراءة السؤال أو العثور على زر متابعة مفعّل خلال 12 ثانية. بقي التشغيل على الدرس الحالي؛ صدّر فحص الصفحة لتحديد عناصره.'};
+          message:issue?`${issue} ${timeoutMessage}`:timeoutMessage};
       }
       continue;
     }
@@ -656,7 +667,7 @@ async function runLesson(tabId,subject,initial,lesson,config,origin,signal,state
       const answer = result.answer;
       if(answer&&rejected.some(previous=>answerKey(previous)===answerKey(answer)))return {review:true,snapshot,question,answer,message:'عاد النموذج إلى إجابة سبق رفضها؛ لم تُرسل مرة أخرى.'};
       if (result.needsReview || !answer || !Number.isFinite(answer.confidence) || answer.confidence < config.minConfidence || (config.verify && result.verified !== true)) {
-        return {review:true,snapshot,question,answer,message:reviewMessages[result.reason] ||
+        return {review:true,snapshot,question,answer,cause:result.reason||'answer_requires_review',message:reviewMessages[result.reason] ||
           'الإجابة تحتاج مراجعة: الثقة منخفضة أو لم تتفق عمليتا الحل والتحقق.'};
       }
       const solveDurationMs=Date.now()-solveStarted;
@@ -878,7 +889,22 @@ async function handle(message) {
           } catch {embedded.push({frameId:record.frameId,issue:'تعذرت قراءة أدوات إطار الدرس وقت الفحص.'});}
         }
       }
-      return {...result,diagnostics:{...result.diagnostics,embedded}};
+      const state=await getState(tabId);
+      const questionEvent=[...state.events].reverse().find(event=>event.question?.text);
+      const reviewEvent=[...state.events].reverse().find(event=>['review','error'].includes(event.kind));
+      const lessonInfo=lesson=>lesson?{id:lesson.id,name:lesson.name,status:lesson.status}:null;
+      const question=questionEvent?.question;
+      const runResult={status:state.status,currentLesson:lessonInfo(state.currentLesson),stats:{...state.stats},
+        lastQuestion:question?{source:'last-run-event',lesson:lessonInfo(questionEvent.currentLesson),
+          subject:questionEvent.currentSubject?.name||null,
+          question:{id:question.id,type:question.type,text:question.text,
+            options:(question.options||[]).map(({id,text})=>({id,text})),requiresVision:question.requiresVision===true,
+            ...(question.items?{items:question.items.map(({id,text})=>({id,text}))}:{}),
+            ...(question.targets?{targets:question.targets.map(({id,text})=>({id,text}))}:{})}}:null,
+        lastReview:reviewEvent?{message:reviewEvent.message,cause:reviewEvent.cause||null,lesson:lessonInfo(reviewEvent.currentLesson),
+          ...(reviewEvent.answer?{answer:{optionIds:reviewEvent.answer.optionIds||[],text:reviewEvent.answer.text||'',
+            explanation:reviewEvent.answer.explanation||'',confidence:reviewEvent.answer.confidence}}:{})}:null};
+      return {...result,diagnostics:{...result.diagnostics,embedded,runResult}};
     }
     case 'START': {
       if (runs.has(tabId)||pendingStarts.has(tabId)) throw new Error('الحل يعمل أو يجري فحص تشغيله بالفعل لهذا التبويب.');

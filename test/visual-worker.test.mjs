@@ -24,6 +24,7 @@ async function setup(t,{language='en',oldServer=false,visionReady=true,broken=fa
     assert.ok(url.endsWith('/api/chat'),url);
     const body=JSON.parse(options.body);chats.push(body);
     assert.equal(body.model,'qwen3-vl:8b');
+    assert.deepEqual(body.format.properties.optionIds.items.enum,['one','two'],'Vision requests must constrain output to the original visible option IDs');
     assert.equal(body.messages[1].images.length,1);
     assert.ok(Buffer.from(body.messages[1].images[0],'base64').subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10])));
     return Response.json({message:{content:JSON.stringify({optionIds:['one'],text:'',explanation:'اختبار نقل الصورة فقط؛ ليس استدلال نموذج حقيقي.',confidence:.99})}});
@@ -36,12 +37,14 @@ async function setup(t,{language='en',oldServer=false,visionReady=true,broken=fa
     storage:{session:{get:async key=>({[key]:storage[key]}),set:async items=>Object.assign(storage,structuredClone(items)),remove:async key=>{delete storage[key];}}},
     tabs:{get:async()=>({id:1,url:h.page.url()}),sendMessage:async(_id,message)=>h.send(message),create:async()=>{},onRemoved:{addListener(){}}},scripting:{executeScript:async()=>{}},action:{onClicked:{addListener(){}}}};
   vm.runInNewContext(await readFile(new URL('../extension/background.js',import.meta.url),'utf8'),{chrome,URL,AbortController,AbortSignal,DOMException,setTimeout,clearTimeout,setInterval,clearInterval,
-    fetch:oldServer?async(url,options)=>{assert.ok(url.endsWith('/api/health'));assert.equal(options.method,undefined);return Response.json({ok:true,configured:true,provider:'ollama',model:'qwen3:8b',modelReady:true});}:fetch});
+    fetch:oldServer?async(url,options)=>{assert.ok(url.endsWith('/api/health'));assert.equal(options.method,undefined);return Response.json({ok:true,configured:true,provider:'ollama',model:'qwen3:8b',modelReady:true,protocolVersion:2});}:fetch});
   const send=message=>new Promise((resolve,reject)=>{if(!handler({tabId:1,...message},{id:'fixture-extension',url:'chrome-extension://fixture-extension/dashboard.html'},resolve))reject(new Error('Rejected worker message.'));});
   t.after(()=>send({type:'STOP'}));
   return {h,chats,events,shown:()=>shown,send,start:async()=>{
     const connection=await send({type:'CONNECT'});assert.equal(connection.ok,true,JSON.stringify(connection));
-    const start=await send({type:'START',subjectId:'math',config:{serverUrl,token:'test-visual-local-token',qualityMode:true,verify:false,autoSubmit:true}});assert.equal(start.ok,true,JSON.stringify(start));
+    const start=await send({type:'START',subjectId:'math',config:{serverUrl,token:'test-visual-local-token',qualityMode:true,verify:false,autoSubmit:true}});
+    if(!oldServer)assert.equal(start.ok,true,JSON.stringify(start));
+    return start;
   }};
 }
 async function terminal(h){
@@ -62,11 +65,20 @@ for(const language of ['ar','en'])test(`${language} text and real graph pixels t
 });
 
 for(const [name,options,reason] of [
-  ['outdated text-only backend',{oldServer:true},/قديمة/],
   ['model that does not actually support images',{visionReady:false},/الرؤية|بصري|للصور/],
   ['unreadable required graph',{broken:true},/صورة|صور|رسم/],
 ])test(`${name} stops before any solve or automatic submission`,async t=>{
   const h=await setup(t,options);await h.start();const event=await terminal(h);
   assert.ok(['review','error'].includes(event.kind),JSON.stringify(event));assert.match(event.message,reason);
   assert.equal(h.chats.length,0);assert.equal(await h.h.page.evaluate(()=>window.visualSubmissions),0);
+});
+
+test('an outdated backend is refused before entering a lesson or capturing question pixels',async t=>{
+  const h=await setup(t,{oldServer:true});
+  const started=await h.start();assert.equal(started.ok,false,JSON.stringify(started));
+  assert.match(started.error,/START-WINDOWS\.cmd/);assert.match(started.error,/المشروع|الخادم|قديمة|تحديث/);
+  assert.equal(h.events.some(row=>['status','queue','lesson','question'].includes(row.event?.kind)),false);
+  assert.equal(h.chats.length,0);assert.equal(h.shown(),0);
+  assert.equal(await h.h.page.evaluate(()=>window.visualSubmissions),0);
+  const state=(await h.send({type:'GET_STATE'})).state;assert.equal(state.running,false);assert.equal(state.stats.total,0);
 });

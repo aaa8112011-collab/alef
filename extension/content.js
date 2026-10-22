@@ -1,7 +1,7 @@
 (() => {
   'use strict';
-  if (globalThis.__alefAssistantInstalled==='0.5.2') return;
-  globalThis.__alefAssistantInstalled = '0.5.2';
+  if (globalThis.__alefAssistantInstalled==='0.5.3') return;
+  globalThis.__alefAssistantInstalled = '0.5.3';
 
   let selectors = {};
   let subjects = new Map();
@@ -135,12 +135,14 @@
     if (!el) return '';
     // Preserve fraction/exponent structure instead of flattening rendered math or
     // reading both KaTeX's visual and accessibility copies of the same formula.
-    if (!el.matches?.('.katex,math,mjx-container') && !el.querySelector?.('.katex,math,mjx-container')) {
+    if (!el.matches?.('.katex,math,mjx-container,sup,sub') && !el.querySelector?.('.katex,math,mjx-container,sup,sub')) {
       return clean(el.innerText || el.textContent || el.getAttribute('aria-label'));
     }
     function read(node) {
       if (node.nodeType === 3) return node.textContent;
       if (!isElement(node)) return '';
+      const style=view(node).getComputedStyle(node);
+      if (node.matches('[hidden],[aria-hidden="true"],script,style') || style.display==='none' || ['hidden','collapse'].includes(style.visibility)) return '';
       if (node.matches('.katex,math,mjx-container')) {
         const latex = node.querySelector('annotation[encoding="application/x-tex"]');
         if (latex?.textContent.trim()) return ` $${latex.textContent.trim()}$ `;
@@ -150,7 +152,20 @@
         if (label) return ` ${label} `;
         throw new Error('الصيغة الرياضية مرسومة دون نص قابل للقراءة؛ راجع السؤال يدويًا.');
       }
-      if (node.matches('[hidden],[aria-hidden="true"],script,style') || view(node).getComputedStyle(node).display === 'none') return '';
+      if (node.matches('sup,sub')) {
+        const value=clean([...node.childNodes].map(read).join(''));
+        if(!value)return '';
+        if(node.matches('sup')) {
+          // Prime point labels, ordinal suffixes and explicit citation markers
+          // are typography, rather than powers of a number or variable.
+          if(/^[′″‴⁗'’]+$/.test(value)||/^(?:st|nd|rd|th)$/i.test(value)||/^[°ºª℉℃]$/.test(value))return value;
+          const citation='[role="doc-noteref"],[data-footnote],a[rel~="footnote"],a[href^="#fn"],a[href^="#footnote"]';
+          if(node.closest(citation)||node.querySelector(citation)||/(?:^|[\s_-])(?:footnote|noteref|reference|citation)(?:$|[\s_-])/i.test(node.className||''))return ` [${value}] `;
+        }
+        // Parentheses retain multi-character, negative and nested scripts.
+        // Concatenating these nodes would turn 2³ into 23 or x₁ into x1.
+        return `${node.matches('sup')?'^':'_'}(${value})`;
+      }
       return [...node.childNodes].map(read).join('');
     }
     return clean(read(el));
@@ -650,6 +665,16 @@
     const authored=container.matches('[data-testid="question-renderer"]')
       ? first('[data-testid^="question-renderer-"]',container)||container : container;
     const copy=authored.cloneNode(true);
+    // Detached clones lose computed styles. Carry visibility from the live
+    // question before removing options, so hidden distractor text cannot turn
+    // a correct calculation into a different expression. Math renderers keep
+    // hidden semantic source below their visible outer math node intentionally.
+    const originalNodes=[...authored.querySelectorAll('*')],copiedNodes=[...copy.querySelectorAll('*')];
+    originalNodes.forEach((node,index)=>{
+      if(node.parentElement?.closest('.katex,math,mjx-container'))return;
+      const style=view(node).getComputedStyle(node);
+      if(style.display==='none'||['hidden','collapse'].includes(style.visibility))copiedNodes[index].setAttribute('hidden','');
+    });
     copy.querySelectorAll('.dropdown-input-field-container,[data-testid="selectableChoice"],select,[role="combobox"]').forEach(node=>node.replaceWith(' [قائمة الإجابة] '));
     copy.querySelectorAll('.dnd-droppable[id^="droppable-"][data-index]').forEach(node=>node.replaceWith(' [blank:'+node.getAttribute('data-index')+'] '));
     copy.querySelectorAll('.dnd-options-draggable,.dnd-options-draggable-overlay,.dnd-overlay').forEach(node=>node.remove());
@@ -892,7 +917,7 @@
     const controls=all('button,[role="button"],[role="radio"],[role="checkbox"],[role="radiogroup"],[role="combobox"],[data-testid]')
       .filter(node=>safeForm(node)&&!node.matches('input,textarea')).sort((a,b)=>Number(inPlayer(b))-Number(inPlayer(a)));
     const choices=all('input[type="radio"],input[type="checkbox"],[role="radio"],[role="checkbox"]').filter(node=>inPlayer(node)&&safeForm(node));
-    return {ok:true,diagnostics:{version:'0.5.2',page:{url:cleanUrl(location.href)},stage:snapshot.stage,
+    return {ok:true,diagnostics:{version:'0.5.3',page:{url:cleanUrl(location.href)},stage:snapshot.stage,
       subjects:snapshot.subjects,lessons:snapshot.lessons.map(({href,...lesson})=>({...lesson,href:href?cleanUrl(href):undefined})),
       navigation:snapshot.navigation,issues:snapshot.diagnostics,frames:snapshot.frames,loading:snapshot.loading,
       ...(snapshot.questionEvidence?{questionEvidence:snapshot.questionEvidence}:{}),

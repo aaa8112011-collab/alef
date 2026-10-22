@@ -9,21 +9,28 @@ const catalogURL='https://moe.alefed.com/#/classes/readiness-class?tab=assigned'
 const config={serverUrl:'http://127.0.0.1:4318',token:'readiness-test-only',verify:false,qualityMode:false,autoSubmit:true,skipInstruction:true,minConfidence:.85};
 
 function harness(t,{loadingReads=3,forever=false,permissionAfter=0,readyQuestionWithProgress=false,frameResult=false,
-  unmarked=false,locked=false,unsupportedQuestion=false}={}) {
+  unmarked=false,locked=false,unsupportedQuestion=false,lateLoadingAtMs=null,readyAfterMs=null,
+  lateDiagnostic=null,diagnosticAtMs=0,permissionAtMs=null,singleLesson=false}={}) {
   const events=[],storage={},opened=[],sent=[],navigation=[];
-  let handler,mode='catalog',current=null,reads=0,clock=0;
+  let handler,mode='catalog',current=null,reads=0,clock=0,lessonStarted=0;
   let url=catalogURL;
   class Clock extends Date {static now(){return clock;}}
   const timeout=(fn,ms)=>setTimeout(()=>{clock+=ms;fn();},1);
   const page=()=>({url,title:'اختبار جاهزية الدرس'});
   const question=()=>({id:'question-'+current,fingerprint:'question-'+current,text:'ما ناتج 1 + 1؟',type:'single',options:[{id:'a',text:'1'},{id:'b',text:'2'}]});
   const snapshot=()=>{
-    if(mode==='catalog')return {ok:true,page:page(),stage:'lessons',completed:false,fingerprint:'catalog',catalog:{type:'core-coursework',tab:'assigned',filter:'all',loading:false},subjects:[subject],navigation:[],lessons:['one','two'].map(id=>({id,name:'درس '+id,kind:'core-lesson',completed:false,locked:false}))};
+    if(mode==='catalog')return {ok:true,page:page(),stage:'lessons',completed:false,fingerprint:'catalog',catalog:{type:'core-coursework',tab:'assigned',filter:'all',loading:false},subjects:[subject],navigation:[],lessons:(singleLesson?['one']:['one','two']).map(id=>({id,name:'درس '+id,kind:'core-lesson',completed:false,locked:false}))};
     if(mode==='loading'){
       reads++;
-      if(permissionAfter&&reads>=permissionAfter)return {ok:true,page:page(),stage:'instruction',permissionRequired:true,loading:true,fingerprint:'permission',question:null,lessons:[],navigation:[],diagnostics:['يحتاج محتوى الدرس إذن Chrome للمصدر: https://content.example.test'],blockedFrames:[{origin:'https://content.example.test'}]};
-      if(forever||reads<=loadingReads)return {ok:true,page:page(),stage:'instruction',loading:!unmarked,framePending:!unmarked&&!frameResult,frameResult,fingerprint:'shell-'+reads,question:null,lessons:[],navigation:[],
-        ...(locked?{diagnostics:['هذا القسم غير مسند أو مقفل في ألف؛ لا يمكن تجاوز القفل تلقائيًا.']}:{})};
+      const elapsed=clock-lessonStarted;
+      if(permissionAfter&&reads>=permissionAfter||permissionAtMs!==null&&elapsed>=permissionAtMs)return {ok:true,page:page(),stage:'instruction',permissionRequired:true,loading:true,fingerprint:'permission',question:null,lessons:[],navigation:[],diagnostics:['يحتاج محتوى الدرس إذن Chrome للمصدر: https://content.example.test'],blockedFrames:[{origin:'https://content.example.test'}]};
+      const lateLoading=lateLoadingAtMs!==null&&elapsed>=lateLoadingAtMs;
+      const loading=!unmarked||lateLoading&&frameResult;
+      const framePending=(!unmarked||lateLoading)&&!frameResult;
+      const pending=readyAfterMs===null?reads<=loadingReads:elapsed<readyAfterMs;
+      const diagnostics=locked?['هذا القسم غير مسند أو مقفل في ألف؛ لا يمكن تجاوز القفل تلقائيًا.']:
+        lateDiagnostic&&elapsed>=diagnosticAtMs?[lateDiagnostic]:[];
+      if(forever||pending)return {ok:true,page:page(),stage:'instruction',loading,framePending,frameResult,fingerprint:'shell-'+reads,question:null,lessons:[],navigation:[],diagnostics};
       mode=frameResult?'parent-next':'question';
     }
     if(mode==='parent-next')return {ok:true,page:page(),stage:'instruction',loading:true,frameResult:true,completed:false,fingerprint:'parent-next',question:null,lessons:[],navigation:[{id:'parent-next',kind:'next'}]};
@@ -36,7 +43,7 @@ function harness(t,{loadingReads=3,forever=false,permissionAfter=0,readyQuestion
       case 'ALEF_SCAN':return {...snapshot(),subjects:[subject]};
       case 'ALEF_SELECT_SUBJECT':mode='catalog';return {ok:true};
       case 'ALEF_INSPECT':return snapshot();
-      case 'ALEF_OPEN_LESSON':current=message.lessonId;opened.push(current);reads=0;mode='loading';url=`https://moe.alefed.com/#/progress/ncle/class/readiness-class/lesson/${current}`;return {ok:true};
+      case 'ALEF_OPEN_LESSON':current=message.lessonId;opened.push(current);reads=0;lessonStarted=clock;mode='loading';url=`https://moe.alefed.com/#/progress/ncle/class/readiness-class/lesson/${current}`;return {ok:true};
       case 'ALEF_APPLY':sent.push(current);mode='complete';return {ok:true,applied:true,submitted:true};
       case 'ALEF_NAVIGATE':navigation.push(message.actionId);if(message.actionId==='parent-next'){mode='question';return {ok:true};}assert.equal(message.actionId,'back');mode='catalog';url=catalogURL;return {ok:true};
       case 'ALEF_CANCEL':return {ok:true};
@@ -51,7 +58,7 @@ function harness(t,{loadingReads=3,forever=false,permissionAfter=0,readyQuestion
   };
   vm.runInNewContext(workerSource,{chrome,URL,AbortController,AbortSignal,DOMException,Date:Clock,setTimeout:timeout,clearTimeout,setInterval,clearInterval,
     fetch:async url=>Response.json(String(url).endsWith('/api/health')
-      ?{ok:true,configured:true,provider:'ollama',modelReady:true,protocolVersion:2,visionReady:true}
+      ?{ok:true,configured:true,provider:'ollama',modelReady:true,protocolVersion:3,visionReady:true}
       :{answer:{optionIds:['b'],text:'',explanation:'مزود اختبار فقط',confidence:.99},verified:false,needsReview:false})});
   const send=message=>new Promise((resolve,reject)=>{if(!handler({tabId:1,...message},{id:'readiness-test',url:'chrome-extension://readiness-test/dashboard.html'},resolve))reject(new Error('Rejected message'));});
   t.after(()=>send({type:'STOP'}));
@@ -145,4 +152,52 @@ test('a recognized unsupported question leaves the readiness wait with its readi
   assert.match(of(h,'review').message,/تفاعلًا غير مدعوم/);
   assert.doesNotMatch(of(h,'review').message,/يتطلب هذا الدرس مشاهدة/);
   assert.deepEqual(h.opened,['one']);assert.deepEqual(h.sent,[]);assert.ok(h.elapsed()<12000);
+});
+
+for(const frameResult of [false,true])test(`an unmarked shell promotes to the original 30 second deadline when late ${frameResult?'loading':'framePending'} appears and proceeds on readiness`,async t=>{
+  const h=harness(t,{unmarked:true,lateLoadingAtMs:10000,readyAfterMs:16000,frameResult,singleLesson:true});
+  await h.start();await waitFor(()=>of(h,'complete'),JSON.stringify(h.events));
+  assert.deepEqual(h.opened,['one']);assert.deepEqual(h.sent,['one']);
+  assert.equal(of(h,'review'),undefined);assert.equal(of(h,'error'),undefined);
+  assert.ok(h.elapsed()>=16000&&h.elapsed()<18000,'Late loading may outlive 12s but readiness must not wait for the whole 30s budget');
+  if(frameResult)assert.deepEqual(h.navigation,['parent-next','back']);
+});
+
+test('late loading promotes only to 30 seconds total rather than restarting its deadline',async t=>{
+  const issue='صيغة السؤال داخل إطار الدرس غير مقروءة بعد التحميل.';
+  const h=harness(t,{unmarked:true,forever:true,lateLoadingAtMs:10000,lateDiagnostic:issue,diagnosticAtMs:20000});await h.start();
+  await waitFor(()=>of(h,'review'),JSON.stringify(h.events));
+  const review=of(h,'review'),state=(await h.send({type:'GET_STATE'})).state;
+  assert.match(review.message,/30 ثانية/);assert.doesNotMatch(review.message,/12 ثانية/);assert.ok(review.message.includes(issue));
+  assert.ok(h.elapsed()>=30000&&h.elapsed()<32000,'The 30s maximum is measured from the original wait, not late frame arrival');
+  assert.deepEqual(h.opened,['one']);assert.deepEqual(h.sent,[]);
+  assert.equal(state.queue[0].status,'review');assert.equal(state.queue[1].status,'pending');
+});
+
+test('STOP still interrupts a readiness wait after late loading promotes its budget',async t=>{
+  const h=harness(t,{unmarked:true,forever:true,lateLoadingAtMs:10000});await h.start();
+  await waitFor(()=>h.elapsed()>=10500,JSON.stringify(h.events));
+  assert.equal((await h.send({type:'STOP'})).ok,true);await new Promise(resolve=>setTimeout(resolve,15));
+  assert.equal((await h.send({type:'GET_STATE'})).state.running,false);
+  assert.deepEqual(h.opened,['one']);assert.deepEqual(h.sent,[]);assert.equal(of(h,'complete'),undefined);assert.equal(of(h,'review'),undefined);
+  assert.ok(h.elapsed()<20000,'STOP does not wait for the promoted deadline');
+});
+
+test('an unmarked timeout preserves the final specific reading diagnostic',async t=>{
+  const issue='ظهر إطار الدرس، لكن صيغة السؤال داخل الإطار غير مقروءة.';
+  const h=harness(t,{unmarked:true,forever:true,lateDiagnostic:issue,diagnosticAtMs:8000});await h.start();
+  await waitFor(()=>of(h,'review'),JSON.stringify(h.events));
+  const review=of(h,'review');assert.ok(review.message.includes(issue));assert.match(review.message,/12 ثانية/);
+  assert.ok(h.elapsed()>=12000&&h.elapsed()<14000,'A stable unreadable shell without explicit loading retains its short deadline');
+  assert.deepEqual(h.opened,['one']);assert.deepEqual(h.sent,[]);
+});
+
+for(const cause of ['permission','lock'])test(`late ${cause} exits a promoted readiness wait immediately with its own reason`,async t=>{
+  const h=harness(t,{unmarked:true,forever:true,lateLoadingAtMs:10000,
+    ...(cause==='permission'?{permissionAtMs:18000}:{lateDiagnostic:'هذا القسم مقفل في ألف.',diagnosticAtMs:18000})});
+  await h.start();await waitFor(()=>of(h,'review'),JSON.stringify(h.events));
+  const review=of(h,'review');assert.equal(review.cause,cause==='permission'?'frame_permission_required':'lesson_locked');
+  assert.ok(h.elapsed()>=18000&&h.elapsed()<20000,'Explicit blockers must not consume the remaining readiness budget');
+  assert.doesNotMatch(review.message,/خلال 12 ثانية|خلال 30 ثانية/);
+  assert.deepEqual(h.opened,['one']);assert.deepEqual(h.sent,[]);
 });

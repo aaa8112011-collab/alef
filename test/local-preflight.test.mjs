@@ -9,7 +9,7 @@ const source=await readFile(new URL('../extension/background.js',import.meta.url
 const catalogURL='https://moe.alefed.com/#/classes/preflight-class?tab=assigned';
 const lessonURL='https://moe.alefed.com/#/progress/ncle/class/preflight-class/lesson/one/material/first';
 const subject={id:'math',name:'الرياضيات'};
-const ready={ok:true,configured:true,provider:'ollama',modelReady:true,model:'qwen3:8b',protocolVersion:2,visionReady:true};
+const ready={ok:true,configured:true,provider:'ollama',modelReady:true,model:'qwen3:8b',protocolVersion:3,visionReady:true};
 const config={serverUrl:'http://127.0.0.1:4318',token:'preflight-fixture-local-only',qualityMode:false,verify:false,autoSubmit:true,skipInstruction:true,minConfidence:.85};
 
 function setup(t,{health=async()=>Response.json(ready),resume=false,holdFinalTab=false}={}) {
@@ -72,6 +72,7 @@ async function rejectedWithoutPageChange(h,pattern) {
   assert.deepEqual(h.messages,[],'No subject selection, lesson opening, answer or injection is permitted before service readiness');
   assert.deepEqual(h.events,[],'A failed preflight must not emit a running session');
   assert.equal(h.requests.length,1);
+  return result;
 }
 
 for(const [name,error] of [
@@ -113,6 +114,12 @@ test('a healthy local service is checked before selecting the subject and can co
   while(!h.events.some(row=>row.event?.kind==='complete')){if(Date.now()>until)assert.fail(JSON.stringify(h.events));await new Promise(resolve=>setTimeout(resolve,10));}
   assert.equal(h.requests.length,1);assert.equal(h.messages.filter(message=>message.type==='ALEF_SELECT_SUBJECT').length,1);
   assert.equal((await h.state()).status,'complete');
+});
+
+for(const resume of [false,true])test(`a protocol 2 backend cannot ${resume?'resume':'start'} the new solver contract before a full project update`,async t=>{
+  const h=setup(t,{resume,health:async()=>Response.json({...ready,protocolVersion:2})});
+  const result=await rejectedWithoutPageChange(h,/START-WINDOWS\.cmd/);
+  assert.match(result.error,/المشروع|الخادم|قديمة|تحديث/,'The refusal must explain a server/project upgrade rather than an API key');
 });
 
 test('an invalid external service address is rejected before any health request',async t=>{

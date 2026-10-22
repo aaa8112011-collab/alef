@@ -174,7 +174,7 @@ test('local Ollama HTTP integration checks the installed model and solves withou
   const url = await withServer(t, { provider: 'ollama', apiKey: '', model: 'qwen3:8b', baseUrl });
   const health = await (await fetch(`${url}/api/health`)).json();
   assert.equal(health.ok, true);
-  assert.equal(health.protocolVersion, 2);
+  assert.equal(health.protocolVersion, 3);
   assert.equal(health.configured, true);
   assert.equal(health.provider, 'ollama');
   assert.equal(health.model, 'qwen3:8b');
@@ -187,7 +187,9 @@ test('local Ollama HTTP integration checks the installed model and solves withou
   assert.deepEqual(await solved.json(), { answer, verified: true, needsReview: false });
   assert.equal(received.length, 2);
   assert.equal(received[0].stream, false);
-  assert.equal(received[0].format, 'json');
+  assert.equal(received[0].format.type, 'object');
+  assert.deepEqual(received[0].format.properties.optionIds.items.enum,input.question.options.map(option=>option.id));
+  assert.deepEqual(received[1].format,received[0].format);
   assert.equal(received[0].think, false);
 });
 
@@ -254,7 +256,7 @@ test('health verifies actual vision capability and the native HTTP route receive
   });
   const url=await withServer(t,{provider:'ollama',model:'qwen3:8b',visionModel:'qwen3-vl:8b',baseUrl});
   const health=await(await fetch(url+'/api/health')).json();
-  assert.equal(health.protocolVersion,2);assert.equal(health.visionInstalled,true);assert.equal(health.visionReady,true);
+  assert.equal(health.protocolVersion,3);assert.equal(health.visionInstalled,true);assert.equal(health.visionReady,true);
   for(const text of ['اقرأ الرسم وحدد معامل التمدد.','Read the diagram and find the dilation scale factor.']){
     const response=await post(url,{...input,qualityMode:true,question:{...input.question,text,requiresVision:true,images:[diagramPng]}});
     assert.equal(response.status,200);

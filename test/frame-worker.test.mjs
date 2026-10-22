@@ -69,7 +69,7 @@ async function listen(html){
 }
 const closeServer=server=>new Promise(resolve=>{server.close(resolve);server.closeAllConnections()});
 
-async function setup(t,{granted=true,holdSolve=false,sameOrigin=false}={}){
+async function setup(t,{granted=true,holdSolve=false,sameOrigin=false,rejectSelection=false}={}){
   const child=await listen(childHTML);
   const top=sameOrigin
     ?await listen(request=>/^\/(?:lesson\/|help)/.test(request.url)?childHTML:parentHTML(top.origin))
@@ -107,11 +107,12 @@ async function setup(t,{granted=true,holdSolve=false,sameOrigin=false}={}){
     action:{onClicked:{addListener(){}}},
   };
   vm.runInNewContext(await readFile(new URL('../extension/background.js',import.meta.url),'utf8'),{chrome,URL,AbortController,AbortSignal,DOMException,setTimeout,clearTimeout,setInterval,clearInterval,fetch:async(url,options)=>{
-    if(url.endsWith('/api/health'))return Response.json({ok:true,configured:true,provider:'ollama',modelReady:true,protocolVersion:2,visionReady:true});
+    if(url.endsWith('/api/health'))return Response.json({ok:true,configured:true,provider:'ollama',modelReady:true,protocolVersion:3,visionReady:true});
     assert.ok(url.endsWith('/api/solve'),String(url));const {question}=JSON.parse(options.body);requests.push(structuredClone(question));
     assert.match(question.text,/2 \+ 2/,'The child question must reach the solver');
     await solveGate;
     const answer=question.options.find(option=>option.text.trim()==='4');assert.ok(answer,JSON.stringify(question));
+    if(rejectSelection)return Response.json({answer:{optionIds:[],text:'',explanation:'',confidence:0},verified:false,needsReview:true,reason:'invalid_selection'});
     return Response.json({answer:{optionIds:[answer.id],text:'',explanation:'Deterministic frame transport fixture, not a model accuracy test.',confidence:.99},verified:false,needsReview:false});
   }},{filename:'frame-worker-background.js'});
   const send=message=>new Promise((resolve,reject)=>{if(!handler({tabId:1,...message},{id:'frame-test',url:'chrome-extension://frame-test/dashboard.html'},value=>resolve(structuredClone(value))))reject(Error('Worker rejected '+message.type))});
@@ -167,14 +168,14 @@ test('a readable same-origin required material still completes the parent NCLE s
   assert.ok(h.injected.some(row=>row.frameId!==0&&row.url.startsWith(h.childOrigin+'/lesson/')),'Required readable materials also use explicit child routing');
 });
 
-test('loaded static instruction uses the SDK-unlocked parent Next without requiring a child completion marker',async t=>{
+for(const backOnly of [false,true])test(`loaded static instruction ${backOnly?'with a Back control':'without child controls'} uses the SDK-unlocked parent Next`,async t=>{
   const h=await setup(t);
   await h.page.locator('[data-alef-subject]').click();
   await h.page.locator('[data-testid="core-coursework-assigned-activity-btn-navigate"]').first().click();
   await h.page.frameLocator('iframe[data-testid="iframed-mlo"]').getByRole('button',{name:'Start',exact:true}).waitFor();
   const content=h.page.frames().find(frame=>frame.url()===h.childOrigin+'/lesson/one');assert.ok(content);
   await content.waitForLoadState('load');
-  await content.evaluate(()=>{main.innerHTML='<article><h1>الاستعارة</h1><p>اقرأ أمثلة الدرس قبل المتابعة.</p></article>';tell('child-complete')});
+  await content.evaluate(backOnly=>{main.innerHTML='<article data-alef-instruction><h1>الاستعارة</h1><p>اقرأ أمثلة الدرس قبل المتابعة.</p>'+ (backOnly?'<button onclick="document.body.dataset.backClicked=1">Go Back</button>':'')+'</article>';tell('child-complete')},backOnly);
   await h.page.locator('[data-testid="activity-navigation-bar__next-button"]').waitFor({state:'visible'});
   await h.page.waitForFunction(()=>!document.querySelector('[data-testid="activity-navigation-bar__next-button"]').disabled);
   await h.start();
@@ -314,6 +315,24 @@ test('page diagnostics include controls from the active lesson frame without exp
   const child=result.diagnostics.embedded.find(item=>item.diagnostics?.stage==='question');assert.ok(child,JSON.stringify(result));
   assert.ok(child.frameId>0);
   assert.ok(child.diagnostics.controls.some(control=>control.label==='Submit Answer'));
+  assert.match(result.diagnostics.runResult.lastQuestion.question.text,/2 \+ 2/);
+  assert.deepEqual(result.diagnostics.runResult.lastQuestion.question.options.map(option=>option.text),['3','4']);
+  assert.equal(result.diagnostics.runResult.lastQuestion.lesson.name,'1. الاستعارة');
   assert.doesNotMatch(JSON.stringify(result),/test-frame-local-only|data:image|base64,/);
   await h.send({type:'STOP'});h.releaseSolve();
+});
+
+
+test('a rejected model selection exports the original question and review cause without inventing a missing correct option',async t=>{
+  const h=await setup(t,{rejectSelection:true});await h.start();
+  const event=await waitFor(h,event=>['review','error'].includes(event.kind));
+  assert.equal(event.kind,'review');assert.equal(event.cause,'invalid_selection');
+  assert.equal(h.messages.some(message=>message.type==='ALEF_APPLY'),false);
+  const result=await h.send({type:'DIAGNOSTICS'});assert.equal(result.ok,true);
+  const {lastQuestion,lastReview}=result.diagnostics.runResult;
+  assert.match(lastQuestion.question.text,/2 \+ 2/);
+  assert.deepEqual(lastQuestion.question.options.map(option=>option.text),['3','4']);
+  assert.equal(lastReview.cause,'invalid_selection');
+  assert.equal(lastReview.lesson.name,'1. الاستعارة');
+  assert.doesNotMatch(JSON.stringify(result),/test-frame-local-only|data:image|base64,/);
 });

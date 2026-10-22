@@ -1,7 +1,7 @@
 (() => {
   'use strict';
-  if (globalThis.__alefAssistantInstalled==='0.5.0') return;
-  globalThis.__alefAssistantInstalled = '0.5.0';
+  if (globalThis.__alefAssistantInstalled==='0.5.1') return;
+  globalThis.__alefAssistantInstalled = '0.5.1';
 
   let selectors = {};
   let subjects = new Map();
@@ -12,7 +12,9 @@
   let weaverDragCache = null;
   let cancelled = false;
   let rootsCache = null;
-  let frameDiagnostics = [];
+  let frameEntries = new Map();
+  const frameLoadStates = new WeakMap();
+  let topCourseContext = false;
   const clean = value => String(value || '').replace(/\s+/g, ' ').trim();
   const WEAVER_QUESTIONS='.mcq-container.question-widget,.dropdown-container.question-widget,.open-ended-container.question-widget,.fib-container.question-widget,.dnd-container.question-widget';
   const hash = text => {
@@ -47,15 +49,54 @@
         if(node.tagName==='IFRAME' && visible(node)) {
           try {
             const doc=node.contentDocument;
-            if(doc?.documentElement)visit(doc);
-            else frameDiagnostics.push('يوجد إطار لا تسمح الصفحة بقراءته؛ يلزم فتح المحتوى في صفحة ألف القابلة للوصول.');
-          }catch{frameDiagnostics.push('يوجد إطار من نطاق آخر؛ لم تُقرأ محتوياته.');}
+            const entry=describeFrame(node,doc);frameEntries.set(node,entry);
+            if(doc?.documentElement&&entry.role!=='supplementary'&&!entry.independent)visit(doc);
+          }catch{frameEntries.set(node,describeFrame(node,null));}
         }
       }
     }
     visit(scope);
     if(scope===document)rootsCache=found;
     return found;
+  }
+  function describeFrame(node,doc) {
+    const srcdoc=node.hasAttribute('srcdoc');
+    const raw=srcdoc?'about:srcdoc':node.getAttribute('src')||'about:blank';
+    let source;
+    try{source=new URL(raw,node.baseURI||node.ownerDocument.location.href);}catch{}
+    const kind=srcdoc?'srcdoc':source?.protocol==='data:'?'data':source?.protocol==='blob:'?'blob':source?.protocol==='about:'?'about':'url';
+    const sandbox=node.hasAttribute('sandbox')?[...node.sandbox]:null;
+    const opaque=!!sandbox&&!sandbox.includes('allow-same-origin')||kind==='data';
+    const supplementary=node.matches('#lesson-float-iframe,[data-testid="lesson-float-iframe"]')||
+      !!node.closest('[data-testid="lesson-float-player"],[data-testid="dhabhi-player"],[data-testid="help-player"],[data-alef-supplementary]');
+    const required=!supplementary&&(node.matches('[data-testid="iframed-mlo"],[data-testid="ncle-extra-content-assignment-player"]')||
+      !!node.closest('[data-testid="ncle-activity-page"],[data-testid="ncle-extra-content-assignment-player"],[data-testid="content-page-body-player"],[data-alef-question-scope],[data-alef-instruction]'));
+    // An embedded material has its own question and completion state. Reading
+    // its DOM as part of the NCLE parent can mistake component completion for
+    // completion of the whole lesson, or click the parent's Next too early.
+    const independent=required&&!!node.closest('[data-testid="ncle-activity-page"],[data-testid="ncle-extra-content-assignment-player"],[data-testid="content-page-body-player"]');
+    const ownerOrigin=node.ownerDocument.location.origin;
+    let parentURL='';
+    try{const ownerURL=new URL(node.ownerDocument.location.href);parentURL=/^https?:$/.test(ownerURL.protocol)?ownerURL.origin+ownerURL.pathname:ownerURL.protocol==='about:'?'about:'+ownerURL.pathname:ownerURL.protocol;}catch{}
+    const origin=source&&source.origin!=='null'?source.origin:kind==='srcdoc'||kind==='about'?ownerOrigin:null;
+    const url=kind==='data'?'data:':kind==='srcdoc'?'about:srcdoc':kind==='about'?(source?.pathname==='blank'?'about:blank':'about:'):kind==='blob'?`blob:${origin||''}`:source&&/^https?:$/.test(source.protocol)?source.origin+source.pathname:source?.protocol||'';
+    const sourceKey=raw;
+    let load=frameLoadStates.get(node);
+    if(!load){
+      load={source:sourceKey,observed:false};frameLoadStates.set(node,load);
+      node.addEventListener('load',()=>{const current=frameLoadStates.get(node);if(current)current.observed=true;});
+    }else if(load.source!==sourceKey){load.source=sourceKey;load.observed=false;}
+    let accessible=false,loading=null,readyState=null;
+    try{
+      accessible=!!doc?.documentElement;
+      readyState=accessible?doc.readyState:null;
+      if(accessible)loading=readyState==='loading'||doc.URL==='about:blank'&&kind==='url';
+      else if(load.observed)loading=false;
+    }catch{}
+    if(node.getAttribute('aria-busy')==='true'||node.getAttribute('data-loading')==='true')loading=true;
+    return {url,parentURL,origin:origin&&origin!=='null'?origin:null,initiatorOrigin:ownerOrigin&&ownerOrigin!=='null'?ownerOrigin:null,
+      kind,accessible,sameOrigin:accessible,loading,readyState,opaque,required,relevant:required,independent,
+      role:supplementary?'supplementary':required?'lesson':'unknown',...(sandbox?{sandbox}:{})};
   }
   const all = (query,scope=document) => [...new Set(roots(scope).flatMap(root=>[...root.querySelectorAll(query)]))].filter(visible);
   const first = (query,scope=document) => all(query,scope)[0] || null;
@@ -245,8 +286,8 @@
     return [...lessons.values()].map(({node,...item})=>item);
   }
   function learningContext() {
-    return /\/(?:pathways|lesson|activity|learn|content|assessment|exercise|progress)/i.test(location.pathname+location.hash) ||
-      !!first('[data-testid="question-renderer"],[data-testid="adaptive-question-renderer"],[data-alef-instruction],[data-alef-question],[data-alef-completed],[data-testid="content-page"],[data-testid="content-page-body-player"],[data-testid="ncle-activity-page"],ul[aria-label="SkillList"]');
+    return topCourseContext || /\/(?:pathways|lesson|activity|learn|content|assessment|exercise|progress)/i.test(location.pathname+location.hash) ||
+      !!first('[data-testid="question-renderer"],[data-testid="adaptive-question-renderer"],[data-alef-instruction],[data-alef-question],[data-alef-completed],[data-testid="content-page"],[data-testid="content-page-body-player"],[data-testid="ncle-activity-page"],ul[aria-label="SkillList"],'+WEAVER_QUESTIONS);
   }
   function actionKind(node) {
     const testId=node.getAttribute('data-testid')||'';
@@ -333,7 +374,7 @@
     const listedLessons=discoverLessons();
     const navigation=discoverActions();
     const catalog=coreCatalog();
-    const diagnostics=[...new Set(frameDiagnostics)];
+    const diagnostics=[];
     let question=null,questionFound=false,questionState={};
     const completed=!loginPage() && completionVisible();
     if(!completed && !loginPage()) {
@@ -351,6 +392,17 @@
     else if(!loginPage() && (navigation.some(action=>['skip','assessment'].includes(action.kind)) || (learningContext()&&navigation.some(action=>action.kind==='next')) ||
       first('[data-alef-instruction],[data-testid="content-page"],[data-testid="content-page-body-player"],[data-testid="ncle-activity-page"],.lesson-intro,.instruction')))stage='instruction';
     else if(listedSubjects.length)stage='subjects';
+    const frames=[...frameEntries.values()];
+    const player=first('[data-testid="ncle-activity-page-player"],[data-testid="content-page-body-player"],[data-alef-instruction],.lesson-intro,.instruction')||
+      (topCourseContext?document.body:null);
+    const spinner=player&&first('.spinner,.loading-spinner,[data-testid="loading-spinner"],[role="progressbar"],[aria-busy="true"]',player);
+    const loading=!loginPage()&&(document.readyState==='loading'||!!spinner||frames.some(frame=>frame.required&&frame.loading===true));
+    for(const frame of frames){
+      if(!frame.required||frame.accessible||frame.loading===true)continue;
+      const host=frame.origin?new URL(frame.origin).host:null;
+      diagnostics.push(host?`لم يُقرأ محتوى إطار الدرس من ${host} بعد؛ قد يحتاج إذن الوصول لهذا المصدر.`:
+        'لم يُقرأ محتوى إطار الدرس بعد؛ يلزم فحص تحميله وإذن الوصول إليه.');
+    }
     if(loginPage())diagnostics.push('صفحة تسجيل الدخول ظاهرة. سجّل الدخول إلى ألف ثم أعد فحص المواد.');
     else if(stage==='unknown')diagnostics.push('لم تتطابق الصفحة مع مواد أو دروس أو سؤال مدعوم. أرسل تقرير تشخيص الواجهة لضبط القارئ.');
     if(first('[data-testid="ncle-lock-screen"]'))diagnostics.push('هذا القسم غير مسند أو مقفل في ألف؛ لا يمكن تجاوز القفل تلقائيًا.');
@@ -359,10 +411,11 @@
       subjects.set('current',{id:'current',name:'المادة المفتوحة حاليًا',node:null});
       listedSubjects.push({id:'current',name:'المادة المفتوحة حاليًا'});
     }
-    const fingerprint=hash(JSON.stringify([location.pathname,location.search,location.hash,text(first('[data-testid="progress-bar-slide-count"]')),stage,catalog,listedSubjects,listedLessons,question?.id,question?.fingerprint,navigation,completed,text(first('[data-alef-instruction],[data-testid="content-page-body-player"],.instruction,main')).slice(0,3000)]));
+    const fingerprint=hash(JSON.stringify([location.pathname,location.search,location.hash,text(first('[data-testid="progress-bar-slide-count"]')),stage,catalog,listedSubjects,listedLessons,question?.id,question?.fingerprint,navigation,completed,loading,frames,text(first('[data-alef-instruction],[data-testid="content-page-body-player"],.instruction,main')).slice(0,3000)]));
     return {ok:true,page:{title:document.title,url:location.href},stage,subjects:listedSubjects,lessons:listedLessons,
       question,needsPreparation:!!questionState.needsPreparation,feedback:questionState.feedback,completed,canNext:navigation.some(action=>action.kind==='next'),navigation,fingerprint,...(catalog?{catalog}:{}),
-      diagnostics:[...new Set(diagnostics)],capabilities:{text:true,single:true,multiple:true,images:true,visionCapture:true,dragAndDrop:true,customSelectors:true,courseNavigation:true}};
+      loading,frames,context:{frame:window!==window.top,documentReadyState:document.readyState},
+      diagnostics:[...new Set(diagnostics)],capabilities:{text:true,single:true,multiple:true,images:true,visionCapture:true,dragAndDrop:true,customSelectors:true,courseNavigation:true,frameContext:true}};
   }
   const scan=()=>inspect();
   function questionContainer() {
@@ -792,15 +845,16 @@
   function diagnostics(){
     const snapshot=inspect();
     const cleanUrl=value=>{try{const url=new URL(value,location.href);return url.origin+url.pathname+(url.hash.startsWith('#/')?url.hash.split('?')[0]:'');}catch{return '';}};
-    return {ok:true,diagnostics:{version:'0.5.0',page:{url:cleanUrl(location.href)},stage:snapshot.stage,subjects:snapshot.subjects,lessons:snapshot.lessons.map(({href,...lesson})=>({...lesson,href:href?cleanUrl(href):undefined})),navigation:snapshot.navigation,issues:snapshot.diagnostics,frames:[...document.querySelectorAll('iframe')].map(frame=>({url:cleanUrl(frame.src),sameOrigin:!!frame.contentDocument})),controls:all('button,[role="button"],[data-testid]').filter(node=>!node.closest('form')&&!node.matches('input,textarea')).slice(0,100).map(node=>({tag:node.tagName,role:node.getAttribute('role'),testId:node.getAttribute('data-testid'),classes:[...node.classList].slice(0,6),label:clean(node.getAttribute('aria-label')|| (node.matches('button,[role="button"]')?text(node):'')).slice(0,100)}))}};
+    return {ok:true,diagnostics:{version:'0.5.1',page:{url:cleanUrl(location.href)},stage:snapshot.stage,subjects:snapshot.subjects,lessons:snapshot.lessons.map(({href,...lesson})=>({...lesson,href:href?cleanUrl(href):undefined})),navigation:snapshot.navigation,issues:snapshot.diagnostics,frames:snapshot.frames,loading:snapshot.loading,controls:all('button,[role="button"],[data-testid]').filter(node=>!node.closest('form')&&!node.matches('input,textarea')).slice(0,100).map(node=>({tag:node.tagName,role:node.getAttribute('role'),testId:node.getAttribute('data-testid'),classes:[...node.classList].slice(0,6),label:clean(node.getAttribute('aria-label')|| (node.matches('button,[role="button"]')?text(node):'')).slice(0,100)}))}};
   }
   function handle(message){
-    rootsCache=null;frameDiagnostics=[];settings(message.selectors);
+    rootsCache=null;frameEntries=new Map();topCourseContext=message.topCourseContext===true;settings(message.selectors);
     switch(message.type){
       case 'ALEF_SCAN':case 'ALEF_INSPECT':return inspect();
       case 'ALEF_DIAGNOSTICS':return diagnostics();
       case 'ALEF_GET_QUESTION':return readQuestion();
       case 'ALEF_GET_VISUALS':return getVisuals(message);
+      case 'ALEF_BEGIN':cancelled=false;return {ok:true};
       case 'ALEF_PREPARE_QUESTION':assertNotCancelled();return prepareQuestion();
       case 'ALEF_CANCEL':cancelled=true;return {ok:true};
       case 'ALEF_SELECT_SUBJECT':{

@@ -7,6 +7,11 @@ let tabId = Number(new URLSearchParams(location.search).get('tabId')) || null;
 let selectedSubject = null;
 let subjects = [];
 let running = false;
+let starting = false;
+let grantingFrames = false;
+let blockedFrames = [];
+let runEventRevision = 0;
+let lastRunSequence = 0;
 let connected = false;
 let config = {serverUrl:DEFAULT_URL,token:'',verify:true,qualityMode:true,autoSubmit:true,skipInstruction:true,selectors:{}};
 let startedAt = null;
@@ -42,16 +47,46 @@ function readRunOptions() {
   config.autoSubmit=$('auto-submit').checked;config.skipInstruction=$('skip-instruction').checked;
 }
 function updateButtons() {
-  $('start').disabled = !connected || !selectedSubject || running;
+  $('start').disabled = !connected || !selectedSubject || running || starting || grantingFrames;
+  $('start-label').textContent = starting ? 'جارٍ البدء…' : running ? 'جارٍ الحل…' : 'ابدأ الحل';
+  $('start').setAttribute('aria-busy',String(starting||running));
   $('stop').disabled = !running;
-  $('connect').disabled = running;
-  $('refresh').disabled = !connected || running;
-  $('verify').disabled = running;
-  $('auto-submit').disabled = running;
-  $('skip-instruction').disabled = running;
-  $('diagnostics').disabled = !connected || running;
-  $('subjects').querySelectorAll('button').forEach(button => {button.disabled = running;});
+  $('connect').disabled = running||starting||grantingFrames;
+  $('refresh').disabled = !connected || running||starting||grantingFrames;
+  $('verify').disabled = running||starting||grantingFrames;
+  $('auto-submit').disabled = running||starting||grantingFrames;
+  $('skip-instruction').disabled = running||starting||grantingFrames;
+  $('diagnostics').disabled = !connected || running||starting||grantingFrames;
+  $('subjects').querySelectorAll('button').forEach(button => {button.disabled = running||starting||grantingFrames;});
   $('selection-label').textContent = subjects.find(subject=>subject.id===selectedSubject)?.name || 'لم تُحدّد مادة بعد';
+  renderFramePermission();
+}
+function observedAlefFrames(items) {
+  const origins=new Set();
+  for(const item of Array.isArray(items)?items:[]) {
+    try {
+      const origin=item?.origin;
+      if(typeof origin!=='string')continue;
+      const url=new URL(origin);
+      const validHost=url.hostname.split('.').every(label=>/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label));
+      if(url.protocol==='https:'&&validHost&&url.hostname.endsWith('.alefed.com')&&url.origin===origin&&!url.port&&!url.username&&!url.password)origins.add(origin);
+    }catch{}
+  }
+  return [...origins].map(origin=>({origin}));
+}
+function renderFramePermission() {
+  $('frame-permission-panel').hidden=!blockedFrames.length||running||starting;
+  $('frame-origins').textContent=blockedFrames.map(item=>item.origin).join('، ');
+  $('grant-frame-access').disabled=grantingFrames||running||starting;
+  $('grant-frame-access').textContent=grantingFrames?'جارٍ طلب السماح…':'السماح بمحتوى الدرس';
+}
+function showRunPhase(event) {
+  const phase=$('run-phase');
+  phase.textContent=typeof event?.message==='string'?event.message:'';
+  phase.hidden=!phase.textContent;
+  if(running) {
+    $('run-status').textContent={status:'جارٍ التنفيذ',queue:'تجهيز الدروس',lesson:'متابعة الدرس',question:'حل السؤال',answer:'تطبيق الإجابة',submitted:'انتظار التالي'}[event?.kind]||'جارٍ الحل';
+  }
 }
 async function message(type, values = {}) {
   if (!chrome?.runtime?.id) throw new Error('افتح هذه الصفحة من إضافة Chrome المثبّتة.');
@@ -197,6 +232,15 @@ function appendEvent(event) {
   $('activity-count').textContent=`${++eventCount} أحداث`;
 }
 function applyEvent(event, log = true) {
+  if(Number.isSafeInteger(event.sequence)&&event.sequence>0) {
+    // A state reply can already include events still queued for delivery.
+    // Sequence numbers also reject out-of-order runtime broadcasts.
+    if(event.sequence<=lastRunSequence)return;
+    lastRunSequence=event.sequence;
+  }
+  runEventRevision++;
+  if(Array.isArray(event.blockedFrames))blockedFrames=observedAlefFrames(event.blockedFrames);
+  else if(['complete','review','error','stopped'].includes(event.kind)&&event.blocking!==false)blockedFrames=[];
   if (event.stats) {
     $('solved-count').textContent = event.stats.solved || 0;
     $('review-count').textContent = event.stats.review || 0;
@@ -205,17 +249,31 @@ function applyEvent(event, log = true) {
   if (log) appendEvent(event);
   showAnswer(event);
   if (['complete','review','error','stopped'].includes(event.kind) && event.blocking !== false) {
-    running=false;$('run-status').textContent=statusNames[event.kind];
+    running=false;$('run-status').textContent=statusNames[event.status]||statusNames[event.kind];
     setBadge(event.kind==='complete'?'اكتملت الجلسة':event.kind==='error'?'تعذّر المتابعة':'متصل',event.kind==='error'?'error':'success');
     if(event.kind==='review' || event.kind==='error') notice(reviewReasons[event.message]||event.message,event.kind==='error');
+  } else if(typeof event.running==='boolean'||['status','queue','lesson','question','answer','submitted'].includes(event.kind)) {
+    // Another dashboard can start this tab's run. Progress events are current
+    // worker state too, even when this page did not send the START request.
+    running=typeof event.running==='boolean'?event.running:true;
+    $('run-status').textContent=statusNames[event.status]||statusNames[running?'running':'idle'];
+    setBadge(running?'جارٍ الحل':connected?'متصل':'غير متصل',running?'running':connected?'success':'neutral');
   }
+  showRunPhase(event);
   if(event.kind==='review'&&event.blocking===false)notice(event.message);
   updateButtons();
 }
 function restoreState(state) {
   if (!state) return;
+  const sequence=Number.isSafeInteger(state.eventSequence)?state.eventSequence:
+    Number.isSafeInteger(state.lastEvent?.sequence)?state.lastEvent.sequence:null;
+  if(sequence!==null) {
+    if(sequence<lastRunSequence)return;
+    lastRunSequence=sequence;
+  }
   clearAnswer({resetLesson:true});
   connected=Boolean(state.page);running=Boolean(state.running);
+  blockedFrames=observedAlefFrames(state.blockedFrames);
   if (state.subjectId) selectedSubject=state.subjectId;
   renderSubjects(state.subjects);
   if(state.page) $('page-name').textContent=state.page.title || 'صفحة ألف مرتبطة';
@@ -226,6 +284,10 @@ function restoreState(state) {
   const events=state.events || [];
   if(events.length) {$('event-log').replaceChildren();eventCount=0;events.forEach(event=>{appendEvent(event);showAnswer(event);});startedAt=events[0].timestamp;}
   showAnswer({currentLesson:state.currentLesson,currentSubject:state.subjects?.find(item=>item.id===state.subjectId)});
+  const lastEvent=state.lastEvent||events.at(-1);
+  showRunPhase(typeof lastEvent?.running==='boolean'&&lastEvent.running!==running
+    ? {message:running?'جارٍ متابعة الدرس…':statusNames[state.status]||'التشغيل متوقف.'}
+    : lastEvent);
   setBadge(running?'جارٍ الحل':connected?'متصل':'غير متصل',running?'running':connected?'success':'neutral');
   updateButtons();
 }
@@ -241,10 +303,11 @@ async function targetTab() {
 async function connect(refresh = false, requestPermission = true) {
   try {
     notice('');$('connect').disabled=true;
-    // Requested only by an explicit click and only for the Alef hostname.
-    const granted = !requestPermission || await chrome.permissions.request({origins:['https://moe.alefed.com/*']});
+    // These two Alef hosts are confirmed by the lesson embeds. Other observed
+    // Alef origins need the separate, explicit lesson-content action below.
+    const granted = !requestPermission || await chrome.permissions.request({origins:['https://moe.alefed.com/*','https://content.alefed.com/*']});
     if(!granted) throw new Error('يلزم السماح للإضافة بقراءة صفحة ألف لربطها.');
-    const tab=await targetTab();tabId=tab.id;
+    const tab=await targetTab();if(tabId!==tab.id)lastRunSequence=0;tabId=tab.id;
     const result=await message(refresh?'SCAN':'CONNECT',{selectors:config.selectors});
     restoreState(result.state);renderSubjects(result.subjects);connected=true;
     $('run-status').textContent=result.subjects?.length?'اختر مادة للبدء':'لم تُكتشف مواد';setBadge('متصل','success');
@@ -339,20 +402,52 @@ async function saveSettings(event) {
     $('settings-dialog').close();notice('حُفظت الإعدادات ورمز الربط على هذا الجهاز.');
   }catch(error){$('settings-error').hidden=false;$('settings-error').textContent=error.message;}
 }
-async function start() {
+async function start(type='START') {
+  // Event handlers pass a MouseEvent; explicit frame resume passes its type.
+  const resume=type==='RESUME_FRAMES';
+  const requestRevision=runEventRevision;
   try {
     notice('');
     await pendingPairingSave;
     if(!config.token){openSettings();throw new Error('الصق رمز الربط المحلي في الإعدادات أولًا. ينسخه تشغيل START-WINDOWS.cmd إلى الحافظة.');}
-    $('start').disabled=true;
+    starting=true;
     readRunOptions();
-    const result=await message('START',{subjectId:selectedSubject,config:{...config,minConfidence:.85}});
-    $('event-log').replaceChildren();eventCount=0;$('activity-count').textContent='0 أحداث';
-    restoreState(result.state);running=true;startedAt=Date.now();
-    $('run-status').textContent='جارٍ الحل';setBadge('جارٍ الحل','running');
+    // Reset before sending: real progress/error events may arrive before the
+    // START response. Never erase those events or force an ended run active.
+    if(!resume) {
+      $('event-log').replaceChildren();eventCount=0;$('activity-count').textContent='0 أحداث';
+      clearAnswer({resetLesson:true});
+      blockedFrames=[];
+    }
+    $('run-status').textContent='جارٍ البدء';
+    showRunPhase({message:resume?'جارٍ متابعة محتوى الدرس الحالي…':'جارٍ بدء التشغيل وفتح الدرس…'});
+    updateButtons();
+    const revision=runEventRevision;
+    const result=await message(resume?'RESUME_FRAMES':'START',{subjectId:selectedSubject,config:{...config,minConfidence:.85}});
+    if(runEventRevision===revision)restoreState(result.state);
+    startedAt=Date.now();
     const {token,...persistent}=config;
     await chrome.storage.local.set({alefConfig:persistent});
-  }catch(error){notice(error.message,true);}finally{updateButtons();}
+  }catch(error){
+    notice(error.message,true);
+    if(starting&&runEventRevision===requestRevision&&!running){$('run-status').textContent='تعذّر البدء';showRunPhase({message:error.message});}
+  }finally{starting=false;updateButtons();}
+}
+async function grantFrameAccess() {
+  const frames=observedAlefFrames(blockedFrames);
+  if(!frames.length||running||starting||grantingFrames)return;
+  grantingFrames=true;
+  try {
+    // Keep the request in this click's user gesture, before awaiting storage or
+    // messages. Request exact observed HTTPS Alef origins only.
+    const permission=chrome.permissions.request({origins:frames.map(item=>`${item.origin}/*`)});
+    updateButtons();
+    const granted=await permission;
+    if(!granted){notice('لم يُمنح السماح بمحتوى الدرس. اضغط الزر واسمح بالوصول لمتابعة الدرس الحالي.');return;}
+    if(running||starting||!blockedFrames.length)return;
+    await start('RESUME_FRAMES');
+  }catch(error){notice(error.message,true);}
+  finally{grantingFrames=false;updateButtons();}
 }
 async function init() {
   if(typeof chrome==='undefined'||!chrome.runtime?.id){notice('هذه واجهة إضافة Chrome. ثبّت مجلد extension، ثم افتح مُعين من شريط الإضافات.',true);return;}
@@ -373,12 +468,20 @@ async function init() {
   $('verify').checked=config.verify===true;$('auto-submit').checked=config.autoSubmit!==false;
   updateSolveMode();
   $('skip-instruction').checked=config.skipInstruction!==false;
+  const initialEvents=[];let loadingState=tabId!==null;
+  chrome.runtime.onMessage.addListener(message=>{
+    if(message.type!=='RUN_EVENT'||message.tabId!==tabId)return;
+    if(loadingState)initialEvents.push(message.event);
+    else applyEvent(message.event);
+  });
   if(tabId!==null){try{const result=await message('GET_STATE');restoreState(result.state);}catch{}}
-  chrome.runtime.onMessage.addListener(message=>{if(message.type==='RUN_EVENT'&&message.tabId===tabId)applyEvent(message.event);});
+  loadingState=false;
+  initialEvents.forEach(event=>applyEvent(event));
   $('connect').addEventListener('click',()=>connect());$('refresh').addEventListener('click',()=>connect(true));
   $('diagnostics').addEventListener('click',exportDiagnostics);
-  $('open-alef').addEventListener('click',async()=>{const tab=await chrome.tabs.create({url:WEBSITE});tabId=tab.id;});
+  $('open-alef').addEventListener('click',async()=>{const tab=await chrome.tabs.create({url:WEBSITE});if(tabId!==tab.id)lastRunSequence=0;tabId=tab.id;});
   $('start').addEventListener('click',start);
+  $('grant-frame-access').addEventListener('click',grantFrameAccess);
   $('verify').addEventListener('change',()=>{readRunOptions();updateSolveMode();});
   $('stop').addEventListener('click',async()=>{try{await message('STOP');}catch(error){notice(error.message,true);}});
   document.querySelectorAll('.settings-trigger').forEach(button=>button.addEventListener('click',openSettings));

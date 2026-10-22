@@ -4,3 +4,7 @@
 .answer-context{margin:0 22px;padding:10px 12px;background:#f8faf5;border:1px solid #e7eee2;border-radius:8px;font-size:10px;color:#6c8260;overflow-wrap:anywhere}.answer-context p{margin:3px 0}.answer-context bdi{font-weight:600;color:#3e593a}.answer-state{margin:10px 22px 0;font-size:10px;line-height:1.8;color:#6d8461;overflow-wrap:anywhere}.answer-state:empty{display:none}.answer-state[data-state="review"]{color:#a27d42}.answer-state[data-state="submitted"]{color:#276b50}
 
 .question-media-note{font-size:10px;color:#6a8061;background:#f3f7ee;padding:8px 10px;border-radius:6px;line-height:1.8}
+
+.run-phase{margin:0;padding:11px 22px;border-top:1px solid #eaf0e8;background:#f7faf4;font-size:11px;color:#536f4b;white-space:pre-wrap;overflow-wrap:anywhere}
+
+.frame-permission-panel{padding:16px 22px;background:#fff9eb;border-top:1px solid #eee2bd;font-size:12px}.frame-permission-panel p{margin:0 0 10px}.frame-origins{overflow-wrap:anywhere;color:#6e654d;font-size:11px;text-align:right}

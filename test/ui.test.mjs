@@ -10,7 +10,7 @@ const root = new URL('../',import.meta.url);
 // Explicit UI-only Chrome API stub. Native unpacked MV3 loading is blocked by
 // this cloud image's managed ExtensionInstallBlocklist; this harness does not
 // change that policy or claim to exercise Chrome's native permission prompt.
-async function dashboardHarness({connected=false,savedConfig=null,savedToken,sessionToken='ui-test-pairing-token-not-a-real-secret',failTokenWrites=false}={}) {
+async function dashboardHarness({connected=false,savedConfig=null,savedToken,sessionToken='ui-test-pairing-token-not-a-real-secret',failTokenWrites=false,initialEventRace=false,initialTerminalRace=false}={}) {
   const resources = new Map(await Promise.all(['dashboard.html','dashboard.css','dashboard.js'].map(async name=>[name,await readFile(new URL(`extension/${name}`,root))])));
   const server=createServer((request,response)=>{
     const name=new URL(request.url,'http://127.0.0.1').pathname.slice(1);
@@ -37,7 +37,7 @@ async function dashboardHarness({connected=false,savedConfig=null,savedToken,ses
       Object.assign(stores[area],structuredClone(value));
     });
     await context.exposeFunction('__removeUIStorage',(area,key)=>{delete stores[area][key];});
-    await context.addInitScript(({connected})=>{
+    await context.addInitScript(({connected,initialEventRace,initialTerminalRace})=>{
       const state={running:false,status:'idle',page:connected?{title:'صفحة اختبار محلية — الرياضيات',url:'http://127.0.0.1/fixture'}:null,
         subjects:connected?[{id:'math',name:'الرياضيات'},{id:'science',name:'العلوم'},{id:'arabic',name:'اللغة العربية'}]:[],
         subjectId:null,stats:{solved:0,review:0,total:0},events:[],lastEvent:null};
@@ -54,9 +54,23 @@ async function dashboardHarness({connected=false,savedConfig=null,savedToken,ses
       globalThis.chrome={runtime:{id:'ui-test-extension',onMessage:{addListener(listener){listeners.push(listener);}},
         async sendMessage(message){
           globalThis.__uiTest.messages.push(structuredClone(message));
-          if(message.type==='GET_STATE')return {ok:true,state:structuredClone(state)};
-          if(message.type==='START'){
-            state.running=true;state.status='running';state.subjectId=message.subjectId;
+          if(message.type==='GET_STATE'){
+            const snapshot=structuredClone(state);
+            if(initialTerminalRace){
+              const timestamp=Date.now();
+              const question={kind:'question',sequence:10,running:true,status:'running',message:'جارٍ حل السؤال السابق.',question:{id:'older-question',text:'السؤال السابق'},timestamp};
+              const terminal={kind:'review',sequence:11,running:false,status:'review',blocking:true,cause:'frame_permission_required',message:'توقف الدرس لانتظار السماح بمحتواه.',blockedFrames:[{origin:'https://learn.alefed.com'}],timestamp};
+              // The old progress broadcast is delivered while GET_STATE is
+              // preparing a snapshot that already contains its later halt.
+              globalThis.__uiTest.emit(question);
+              Object.assign(state,{running:false,status:'review',eventSequence:11,subjectId:'arabic',blockedFrames:terminal.blockedFrames,events:[question,terminal],lastEvent:terminal});
+              return {ok:true,state:structuredClone(state)};
+            }
+            if(initialEventRace){snapshot.eventSequence=4;state.running=true;state.status='running';state.subjectId='math';state.eventSequence=5;globalThis.__uiTest.emit({kind:'status',sequence:5,running:true,status:'running',message:'جارٍ متابعة الدرس من نافذة أخرى.',timestamp:Date.now()});}
+            return {ok:true,state:snapshot};
+          }
+          if(message.type==='START'||message.type==='RESUME_FRAMES'){
+            state.running=true;state.status='running';state.subjectId=message.subjectId;state.blockedFrames=[];
             return {ok:true,state:structuredClone(state)};
           }
           if(message.type==='STOP'){
@@ -70,7 +84,7 @@ async function dashboardHarness({connected=false,savedConfig=null,savedToken,ses
         permissions:{async request(value){globalThis.__uiTest.permissions.push(value);return true;}},
         tabs:{async get(){return {id:1,url:'https://moe.alefed.com/'};},async query(){return [{id:1,url:'https://moe.alefed.com/'}];},async create(){return {id:1};}},
       };
-    },{connected});
+    },{connected,initialEventRace,initialTerminalRace});
     const openPage=async()=>{
       const page=await context.newPage();page.setDefaultTimeout(7000);
       page.on('pageerror',error=>errors.push(error.message));
@@ -173,9 +187,267 @@ test('dashboard subject choice, start/stop, event rendering and permission reque
     assert.equal(await page.locator('#start').isEnabled(),true);
     await page.locator('#connect').click();
     await page.waitForFunction(()=>__uiTest.permissions.length===1);
-    assert.deepEqual(await page.evaluate(()=>__uiTest.permissions[0]),{origins:['https://moe.alefed.com/*']});
+    assert.deepEqual(await page.evaluate(()=>__uiTest.permissions[0]),{origins:['https://moe.alefed.com/*','https://content.alefed.com/*']});
     assert.deepEqual(harness.errors,[]);
   }finally{await harness.close();}
+});
+
+test('a late START response never overwrites an already received terminal event or erases its reason',async()=>{
+  const h=await dashboardHarness({connected:true});
+  try{
+    const {page}=h;
+    await page.locator('#subjects button').first().click();
+    await page.evaluate(()=>{
+      const original=chrome.runtime.sendMessage.bind(chrome.runtime);
+      chrome.runtime.sendMessage=message=>{
+        if(message.type!=='START')return original(message);
+        __uiTest.messages.push(structuredClone(message));
+        const stale={...structuredClone(__uiTest.state),running:true,status:'running',subjectId:'math'};
+        return new Promise(resolve=>{__uiTest.releaseStart=()=>resolve({ok:true,state:stale});});
+      };
+    });
+    await page.locator('#start').click();
+    await page.waitForFunction(()=>typeof __uiTest.releaseStart==='function');
+    assert.equal(await page.locator('#start-label').textContent(),'جارٍ البدء…');
+    await page.evaluate(()=>__uiTest.emit({kind:'review',blocking:true,message:'توقف الدرس لأن محتواه داخل إطار غير مقروء.',stats:{solved:0,review:1,total:0},timestamp:Date.now()}));
+    await page.evaluate(()=>__uiTest.releaseStart());
+    await page.waitForFunction(()=>!document.querySelector('#start').disabled);
+    assert.equal(await page.locator('#start-label').textContent(),'ابدأ الحل');
+    assert.equal(await page.locator('#stop').isDisabled(),true);
+    assert.equal(await page.locator('#run-status').textContent(),'تحتاج مراجعتك');
+    assert.match(await page.locator('#run-phase').textContent(),/إطار غير مقروء/);
+    assert.match(await page.locator('#notice').textContent(),/إطار غير مقروء/);
+    assert.equal(await page.locator('#event-log li').count(),1,'The actual review event cannot be cleared by the stale START snapshot');
+    assert.deepEqual(h.errors,[]);
+  }finally{await h.close();}
+});
+
+test('a terminal state returned directly by START keeps the controls stopped',async()=>{
+  const h=await dashboardHarness({connected:true});
+  try{
+    const {page}=h;await page.locator('#subjects button').first().click();
+    await page.evaluate(()=>{
+      const original=chrome.runtime.sendMessage.bind(chrome.runtime);
+      chrome.runtime.sendMessage=async message=>{
+        if(message.type!=='START')return original(message);
+        const event={kind:'error',message:'تعذر فتح محتوى الدرس.',timestamp:Date.now()};
+        return {ok:true,state:{...structuredClone(__uiTest.state),running:false,status:'error',subjectId:'math',events:[event],lastEvent:event}};
+      };
+    });
+    await page.locator('#start').click();
+    await page.waitForFunction(()=>document.querySelector('#run-status').textContent==='تعذّر المتابعة');
+    assert.equal(await page.locator('#start').isEnabled(),true);
+    assert.equal(await page.locator('#stop').isDisabled(),true);
+    assert.equal(await page.locator('#start-label').textContent(),'ابدأ الحل');
+    assert.equal(await page.locator('#run-phase').textContent(),'تعذر فتح محتوى الدرس.');
+    assert.deepEqual(h.errors,[]);
+  }finally{await h.close();}
+});
+
+test('progress from another dashboard marks this run active and shows the current phase instead of a disabled idle start label',async()=>{
+  const h=await dashboardHarness({connected:true});
+  try{
+    const {page}=h;
+    assert.equal(await page.locator('#stop').isDisabled(),true);
+    await page.evaluate(()=>__uiTest.emit({kind:'status',message:'جارٍ قراءة محتوى الدرس المفتوح…',timestamp:Date.now()}));
+    assert.equal(await page.locator('#start-label').textContent(),'جارٍ الحل…');
+    assert.equal(await page.locator('#stop').isEnabled(),true);
+    assert.equal(await page.locator('#run-status').textContent(),'جارٍ التنفيذ');
+    assert.equal(await page.locator('#run-phase').textContent(),'جارٍ قراءة محتوى الدرس المفتوح…');
+    await page.evaluate(()=>__uiTest.emit({kind:'question',message:'جارٍ حل السؤال العربي داخل الإطار…',question:{id:'frame-q',text:'أين تقع مدينة أبوظبي؟',options:[]},timestamp:Date.now()}));
+    assert.equal(await page.locator('#run-status').textContent(),'حل السؤال');
+    assert.match(await page.locator('#run-phase').textContent(),/السؤال العربي/);
+    await page.evaluate(()=>__uiTest.emit({kind:'stopped',message:'تم إيقاف الحل.',timestamp:Date.now()}));
+    assert.equal(await page.locator('#start-label').textContent(),'ابدأ الحل');
+    assert.equal(await page.locator('#stop').isDisabled(),true);
+    assert.equal(await page.locator('#run-status').textContent(),'متوقف');
+    assert.deepEqual(h.errors,[]);
+  }finally{await h.close();}
+});
+
+test('an event delivered during initial state loading is not lost or overwritten by the older GET_STATE snapshot',async()=>{
+  const h=await dashboardHarness({connected:true,initialEventRace:true});
+  try{
+    assert.equal(await h.page.locator('#stop').isEnabled(),true);
+    assert.equal(await h.page.locator('#start-label').textContent(),'جارٍ الحل…');
+    assert.equal(await h.page.locator('#run-phase').textContent(),'جارٍ متابعة الدرس من نافذة أخرى.');
+    assert.equal(await h.page.locator('#subjects button').count(),3,'The initial page and subjects still restore while newer run events take priority');
+    assert.deepEqual(h.errors,[]);
+  }finally{await h.close();}
+});
+
+test('initial buffered progress cannot revive a newer terminal snapshot even when both events share a timestamp',async()=>{
+  const h=await dashboardHarness({connected:true,initialTerminalRace:true});
+  try{
+    const {page}=h;
+    assert.equal(await page.locator('#start').isEnabled(),true);
+    assert.equal(await page.locator('#start-label').textContent(),'ابدأ الحل');
+    assert.equal(await page.locator('#stop').isDisabled(),true);
+    assert.equal(await page.locator('#run-status').textContent(),'تحتاج مراجعتك');
+    assert.equal(await page.locator('#run-phase').textContent(),'توقف الدرس لانتظار السماح بمحتواه.');
+    assert.equal(await page.locator('#frame-permission-panel').isVisible(),true);
+    assert.equal(await page.locator('#event-log li').count(),2,'The snapshot already contains the buffered question; do not replay it');
+    assert.equal(await page.locator('#answer-state').getAttribute('data-state'),'review');
+    // A delayed broadcast for that older state must not overwrite the halt.
+    await page.evaluate(()=>__uiTest.emit({kind:'question',sequence:10,running:true,status:'running',message:'إعادة بث قديمة.',question:{id:'old',text:'سؤال قديم'},timestamp:Date.now()}));
+    assert.equal(await page.locator('#run-status').textContent(),'تحتاج مراجعتك');
+    assert.equal(await page.locator('#event-log li').count(),2);
+    // A genuinely newer run still activates without reopening the dashboard.
+    await page.evaluate(()=>__uiTest.emit({kind:'question',sequence:12,running:true,status:'running',message:'جارٍ حل السؤال الجديد.',blockedFrames:[],question:{id:'new',text:'السؤال الجديد'},timestamp:Date.now()}));
+    assert.equal(await page.locator('#stop').isEnabled(),true);
+    assert.equal(await page.locator('#start-label').textContent(),'جارٍ الحل…');
+    assert.equal(await page.locator('#question-text').textContent(),'السؤال الجديد');
+    assert.equal(await page.locator('#frame-permission-panel').isHidden(),true);
+    assert.deepEqual(h.errors,[]);
+  }finally{await h.close();}
+});
+
+test('progress carrying explicit stopped worker state does not show a running session',async()=>{
+  const h=await dashboardHarness({connected:true});
+  try{
+    const {page}=h;
+    await page.evaluate(()=>__uiTest.emit({kind:'status',sequence:1,running:false,status:'stopped',message:'التشغيل متوقف بعد إلغاء القراءة.',timestamp:Date.now()}));
+    assert.equal(await page.locator('#stop').isDisabled(),true);
+    assert.equal(await page.locator('#start-label').textContent(),'ابدأ الحل');
+    assert.equal(await page.locator('#run-status').textContent(),'متوقف');
+    assert.equal(await page.locator('#run-phase').textContent(),'التشغيل متوقف بعد إلغاء القراءة.');
+    assert.deepEqual(h.errors,[]);
+  }finally{await h.close();}
+});
+
+test('a resumed running snapshot does not present its previous terminal event as the current phase',async()=>{
+  const h=await dashboardHarness({connected:true});
+  try{
+    const {page}=h;
+    await page.evaluate(()=>{
+      const previous={kind:'review',sequence:20,running:false,status:'review',message:'توقف قديم لانتظار السماح.',timestamp:Date.now()};
+      restoreState({...structuredClone(__uiTest.state),running:true,status:'running',subjectId:'arabic',eventSequence:20,events:[previous],lastEvent:previous,blockedFrames:[]});
+    });
+    assert.equal(await page.locator('#stop').isEnabled(),true);
+    assert.equal(await page.locator('#start-label').textContent(),'جارٍ الحل…');
+    assert.equal(await page.locator('#run-phase').textContent(),'جارٍ متابعة الدرس…');
+    assert.equal(await page.locator('#event-log li').count(),1,'Previous terminal details remain available as history');
+    assert.match(await page.locator('#event-log').textContent(),/توقف قديم/);
+    assert.deepEqual(h.errors,[]);
+  }finally{await h.close();}
+});
+
+test('observed Alef frame access is requested from an explicit click and resumes the same lesson without restarting its course',async()=>{
+  const h=await dashboardHarness({connected:true});
+  try{
+    const {page}=h;
+    await page.locator('#subjects button').filter({hasText:'اللغة العربية'}).click();
+    await page.evaluate(()=>{
+      const event={kind:'review',cause:'frame_permission_required',blocking:true,message:'يحتاج محتوى الدرس سماحًا إضافيًا.',
+        blockedFrames:[{origin:'https://learn.alefed.com'},{origin:'https://content.alefed.com'},{origin:'https://learn.alefed.com'}],
+        currentLesson:{id:'metaphor',name:'50. الاستعارة'},queue:[{id:'metaphor',name:'50. الاستعارة',status:'review'},{id:'next-lesson',name:'الدرس التالي',status:'pending'}],timestamp:Date.now()};
+      Object.assign(__uiTest.state,{subjectId:'arabic',status:'review',currentLesson:event.currentLesson,queue:event.queue,blockedFrames:event.blockedFrames,events:[event],lastEvent:event});
+      __uiTest.emit(event);
+      // Permission requests must begin synchronously in the click handler,
+      // before this pending token write can resolve.
+      pendingPairingSave=new Promise(resolve=>{__uiTest.releasePairing=resolve;});
+    });
+    assert.equal(await page.locator('#frame-permission-panel').isVisible(),true);
+    assert.equal(await page.locator('#grant-frame-access').textContent(),'السماح بمحتوى الدرس');
+    assert.ok((await page.locator('#frame-origins').textContent()).includes('https://learn.alefed.com'));
+    await page.locator('#grant-frame-access').click();
+    assert.deepEqual(await page.evaluate(()=>__uiTest.permissions),[{origins:['https://learn.alefed.com/*','https://content.alefed.com/*']}]);
+    assert.equal(await page.evaluate(()=>__uiTest.messages.some(message=>message.type==='RESUME_FRAMES')),false);
+    await page.evaluate(()=>__uiTest.releasePairing());
+    await page.waitForFunction(()=>__uiTest.messages.some(message=>message.type==='RESUME_FRAMES'));
+    const resume=await page.evaluate(()=>__uiTest.messages.find(message=>message.type==='RESUME_FRAMES'));
+    assert.equal(resume.subjectId,'arabic');
+    assert.equal(resume.config.qualityMode,true);assert.equal(resume.config.verify,true);assert.equal(resume.config.minConfidence,.85);
+    assert.equal(await page.evaluate(()=>__uiTest.messages.some(message=>message.type==='START')),false);
+    assert.match(await page.locator('#current-lesson').textContent(),/الاستعارة/);
+    assert.equal(await page.locator('#lesson-queue li').count(),2);
+    assert.equal(await page.locator('#event-log li').count(),1,'Resuming preserves the prior lesson reason and activity history');
+    assert.equal(await page.locator('#frame-permission-panel').isHidden(),true);
+    assert.equal(await page.locator('#stop').isEnabled(),true);
+    assert.deepEqual(h.errors,[]);
+  }finally{await h.close();}
+});
+
+test('denied frame permission keeps the recovery action available without resuming or navigating',async()=>{
+  const h=await dashboardHarness({connected:true});
+  try{
+    const {page}=h;
+    await page.evaluate(()=>{
+      chrome.permissions.request=async value=>{__uiTest.permissions.push(value);return false;};
+      __uiTest.emit({kind:'review',cause:'frame_permission_required',blocking:true,message:'يلزم السماح بمحتوى الدرس.',blockedFrames:[{origin:'https://learn.alefed.com'}],timestamp:Date.now()});
+    });
+    await page.locator('#grant-frame-access').click();
+    await page.waitForFunction(()=>!document.querySelector('#grant-frame-access').disabled);
+    assert.equal(await page.locator('#frame-permission-panel').isVisible(),true);
+    assert.match(await page.locator('#notice').textContent(),/لم يُمنح السماح/);
+    assert.equal(await page.evaluate(()=>__uiTest.messages.some(message=>['START','RESUME_FRAMES'].includes(message.type))),false);
+    assert.deepEqual(h.errors,[]);
+  }finally{await h.close();}
+});
+
+test('frame recovery ignores foreign, non-HTTPS and non-origin targets and renders only exact observed Alef origins',async()=>{
+  const h=await dashboardHarness({connected:true});
+  try{
+    const {page}=h;
+    const unsafe=['https://evil.invalid','https://alefed.com.evil.invalid','http://learn.alefed.com','https://learn.alefed.com/path','https://learn.alefed.com?secret=1','https://user@learn.alefed.com','https://*.alefed.com','null'];
+    await page.evaluate(unsafe=>__uiTest.emit({kind:'review',blocking:true,message:'تعذر الوصول.',blockedFrames:unsafe.map(origin=>({origin})),timestamp:Date.now()}),unsafe);
+    assert.equal(await page.locator('#frame-permission-panel').isHidden(),true);
+    await page.evaluate(()=>grantFrameAccess());
+    assert.deepEqual(await page.evaluate(()=>__uiTest.permissions),[]);
+    await page.evaluate(unsafe=>__uiTest.emit({kind:'review',cause:'frame_permission_required',blocking:true,message:'يلزم السماح بمحتوى ألف.',blockedFrames:[...unsafe.map(origin=>({origin})),{origin:'https://learn.alefed.com'}],timestamp:Date.now()}),unsafe);
+    assert.equal(await page.locator('#frame-origins').textContent(),'https://learn.alefed.com');
+    await page.locator('#grant-frame-access').click();
+    await page.waitForFunction(()=>__uiTest.permissions.length===1);
+    assert.deepEqual(await page.evaluate(()=>__uiTest.permissions[0]),{origins:['https://learn.alefed.com/*']});
+    assert.deepEqual(h.errors,[]);
+  }finally{await h.close();}
+});
+
+test('a late frame-resume response does not overwrite a new blocking event or hide its permission action',async()=>{
+  const h=await dashboardHarness({connected:true});
+  try{
+    const {page}=h;await page.locator('#subjects button').first().click();
+    await page.evaluate(()=>{
+      __uiTest.emit({kind:'review',cause:'frame_permission_required',blocking:true,message:'اسمح بالمحتوى الأول.',blockedFrames:[{origin:'https://learn.alefed.com'}],timestamp:Date.now()});
+      const original=chrome.runtime.sendMessage.bind(chrome.runtime);
+      chrome.runtime.sendMessage=message=>{
+        if(message.type!=='RESUME_FRAMES')return original(message);
+        __uiTest.messages.push(structuredClone(message));
+        const stale={...structuredClone(__uiTest.state),running:true,status:'running',subjectId:'math',blockedFrames:[]};
+        return new Promise(resolve=>{__uiTest.releaseResume=()=>resolve({ok:true,state:stale});});
+      };
+    });
+    await page.locator('#grant-frame-access').click();
+    await page.waitForFunction(()=>typeof __uiTest.releaseResume==='function');
+    await page.evaluate(()=>{
+      __uiTest.emit({kind:'review',cause:'frame_permission_required',blocking:true,message:'يوجد محتوى إضافي يحتاج سماحًا.',blockedFrames:[{origin:'https://activities.alefed.com'}],timestamp:Date.now()});
+      __uiTest.releaseResume();
+    });
+    await page.waitForFunction(()=>!document.querySelector('#grant-frame-access').disabled);
+    assert.equal(await page.locator('#start').isEnabled(),true);
+    assert.equal(await page.locator('#stop').isDisabled(),true);
+    assert.equal(await page.locator('#frame-permission-panel').isVisible(),true);
+    assert.equal(await page.locator('#frame-origins').textContent(),'https://activities.alefed.com');
+    assert.match(await page.locator('#run-phase').textContent(),/محتوى إضافي/);
+    assert.equal(await page.locator('#event-log li').count(),2);
+    assert.deepEqual(h.errors,[]);
+  }finally{await h.close();}
+});
+
+test('restoring a blocked lesson exposes its permission action and active progress clears it',async()=>{
+  const h=await dashboardHarness({connected:true});
+  try{
+    const {page}=h;
+    await page.evaluate(()=>restoreState({...structuredClone(__uiTest.state),status:'review',subjectId:'arabic',blockedFrames:[{origin:'https://learn.alefed.com'}],
+      lastEvent:{kind:'review',blocking:true,message:'يلزم السماح بمحتوى الدرس المحفوظ.'}}));
+    assert.equal(await page.locator('#frame-permission-panel').isVisible(),true);
+    assert.match(await page.locator('#run-phase').textContent(),/الدرس المحفوظ/);
+    await page.evaluate(()=>__uiTest.emit({kind:'status',message:'جارٍ متابعة الدرس نفسه.',blockedFrames:[],timestamp:Date.now()}));
+    assert.equal(await page.locator('#frame-permission-panel').isHidden(),true);
+    assert.equal(await page.locator('#frame-origins').textContent(),'');
+    assert.equal(await page.locator('#start-label').textContent(),'جارٍ الحل…');
+    assert.deepEqual(h.errors,[]);
+  }finally{await h.close();}
 });
 
 test('server check shows local model readiness without paid credentials and precise missing-runtime/model messages',async()=>{

@@ -9,6 +9,7 @@ void restrictLocalSettings();
 
 const runs = new Map();
 const states = new Map();
+const frameRoutes = new Map();
 const reviewMessages = {
   low_confidence:'تقدير الثقة منخفض؛ راجع الإجابة قبل إرسالها.',
   verification_disagreement:'لم تتفق عمليتا الحل والتحقق؛ راجع السؤال.',
@@ -25,7 +26,7 @@ const allowedOrigin = url => {
 };
 const freshStats = () => ({solved:0,review:0,total:0,lessonsCompleted:0,lessonsTotal:0,lessonsReview:0});
 const freshState = () => ({running:false,status:'idle',page:null,subjects:[],subjectId:null,
-  queue:[],currentLesson:null,catalogURL:null,catalogClass:null,stats:freshStats(),events:[],lastEvent:null});
+  queue:[],currentLesson:null,catalogURL:null,catalogClass:null,blockedFrames:[],stats:freshStats(),events:[],lastEvent:null,eventSequence:0});
 const key = tabId => `alef:run:${tabId}`;
 const aborted = () => new DOMException('تم إيقاف التشغيل.','AbortError');
 function assertActive(signal) { if (signal.aborted) throw aborted(); }
@@ -43,10 +44,12 @@ async function getState(tabId) {
     stored.stats = {...freshStats(),...stored.stats};
     stored.queue ||= [];
     stored.currentLesson ||= null;
+    stored.blockedFrames ||= [];
+    stored.eventSequence=Number.isSafeInteger(stored.eventSequence)?stored.eventSequence:0;
     if (stored.running && !runs.has(tabId)) {
       stored.running = false;
       stored.status = 'interrupted';
-      stored.lastEvent = {kind:'stopped',message:'انقطعت جلسة الإضافة. افحص الصفحة ثم ابدأ مجددًا.',timestamp:Date.now(),stats:stored.stats};
+      stored.lastEvent = {kind:'stopped',message:'انقطعت جلسة الإضافة. افحص الصفحة ثم ابدأ مجددًا.',timestamp:Date.now(),sequence:++stored.eventSequence,stats:stored.stats};
       (stored.events ||= []).push(stored.lastEvent);
     }
     states.set(tabId,stored);
@@ -58,10 +61,11 @@ async function saveState(tabId) {
 }
 async function emit(tabId,kind,message,details={}) {
   const state = await getState(tabId);
-  const event = {kind,message,...details,stats:{...state.stats},timestamp:Date.now()};
+  const event = {kind,message,...details,stats:{...state.stats},timestamp:Date.now(),sequence:++state.eventSequence};
   if (state.currentLesson) event.currentLesson = {...state.currentLesson};
   const subject = state.subjects.find(item=>item.id===state.subjectId);
   if (subject) event.currentSubject = {id:subject.id,name:subject.name};
+  event.blockedFrames=(state.blockedFrames||[]).map(item=>({...item}));
   if (['queue','lesson','complete','review','error','stopped'].includes(kind)) {
     event.queue = state.queue.map(item=>({...item}));
   }
@@ -71,6 +75,7 @@ async function emit(tabId,kind,message,details={}) {
     state.status = kind;
     state.running = false;
   }
+  event.running=state.running;event.status=state.status;
   await saveState(tabId);
   try { await chrome.runtime.sendMessage({type:'RUN_EVENT',tabId,event}); } catch { /* Dashboard may be closed. */ }
 }
@@ -97,16 +102,47 @@ async function checkedTab(tabId,origin) {
   }
   return tab;
 }
-async function inject(tabId,origin) {
-  await checkedTab(tabId,origin);
-  await chrome.scripting.executeScript({target:{tabId},files:['content.js']});
+function routeState(tabId) {
+  if(!frameRoutes.has(tabId))frameRoutes.set(tabId,{active:0,begun:new Set(),controller:null,injected:new Set([0]),documents:new Set(),permissions:new Map()});
+  return frameRoutes.get(tabId);
 }
-async function pageMessage(tabId,message,origin,signal) {
+function frameOrigin(value,topOrigin) {
+  try {
+    const url=new URL(value);
+    if(url.protocol==='https:'&&!url.port&&!url.username&&!url.password&&
+      /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*alefed\.com$/i.test(url.hostname))return url.origin;
+    const top=new URL(topOrigin);
+    if(top.protocol==='http:'&&['localhost','127.0.0.1'].includes(top.hostname)&&
+      url.protocol==='http:'&&['localhost','127.0.0.1'].includes(url.hostname))return url.origin;
+  }catch{}
+  return null;
+}
+function cleanFrameURL(value) {
+  try {const url=new URL(value);return /^https?:$/.test(url.protocol)?url.origin+url.pathname:url.protocol==='about:'?'about:'+url.pathname:url.protocol;}catch{return '';}
+}
+function lessonPageKey(value) {
+  try {const url=new URL(value);return url.origin+url.pathname+url.hash.split('?')[0];}catch{return '';}
+}
+async function framePermission(origin,topOrigin) {
+  if(origin===topOrigin)return true;
+  if(!chrome.permissions?.contains)return false;
+  try{return await chrome.permissions.contains({origins:[`${origin}/*`]});}catch{return false;}
+}
+async function inject(tabId,origin,frameId=0) {
+  await checkedTab(tabId,origin);
+  await chrome.scripting.executeScript({target:{tabId,...(frameId?{frameIds:[frameId]}:{frameIds:[0]})},files:['content.js']});
+  routeState(tabId).injected.add(frameId);
+}
+async function pageMessage(tabId,message,origin,signal,frameOverride,documentId) {
   if (signal) assertActive(signal);
   await checkedTab(tabId,origin);
   if (signal) assertActive(signal);
+  const pageOnly=['ALEF_SCAN','ALEF_SELECT_SUBJECT','ALEF_OPEN_LESSON','ALEF_DIAGNOSTICS'].includes(message.type);
+  const frameId=frameOverride??(pageOnly?0:routeState(tabId).active);
+  const request={...message,...(frameId?{topCourseContext:true}:{})};
   let result;
-  try { result = await chrome.tabs.sendMessage(tabId,message); }
+  const target={frameId,...(documentId?{documentId}:{})};
+  try { result = await chrome.tabs.sendMessage(tabId,request,target); }
   catch (error) {
     if (signal) assertActive(signal);
     if (['ALEF_APPLY','ALEF_SELECT_SUBJECT','ALEF_NEXT','ALEF_OPEN_LESSON','ALEF_NAVIGATE'].includes(message.type)) {
@@ -117,8 +153,8 @@ async function pageMessage(tabId,message,origin,signal) {
       if (['ALEF_NEXT','ALEF_OPEN_LESSON','ALEF_NAVIGATE'].includes(message.type)) return {ok:true,clicked:true,uncertain:true};
       throw Object.assign(new Error('انقطع الاتصال أثناء تطبيق الإجابة. تحقق من آخر إرسال في ألف قبل إعادة البدء.'),{fatal:true});
     }
-    await inject(tabId,origin);
-    result = await chrome.tabs.sendMessage(tabId,message);
+    await inject(tabId,origin,frameId);
+    result = await chrome.tabs.sendMessage(tabId,request,target);
   }
   if (signal) assertActive(signal);
   if (!result || !result.ok) throw new Error(result?.error || 'تعذر الاتصال بصفحة ألف. أعد تحميل الصفحة والربط.');
@@ -161,7 +197,120 @@ async function connect(tabId,selectors) {
   return {...snapshot,state};
 }
 async function inspect(tabId,config,origin,signal) {
-  return pageMessage(tabId,{type:'ALEF_INSPECT',selectors:config.selectors},origin,signal);
+  const top=await pageMessage(tabId,{type:'ALEF_INSPECT',selectors:config.selectors},origin,signal,0);
+  const routes=routeState(tabId);
+  if(top.question||top.completed||['lessons','subjects'].includes(top.stage)||!chrome.webNavigation?.getAllFrames) {
+    routes.active=0;return top;
+  }
+  const initial=(top.frames||[]).filter(frame=>frame.required===true);
+  if(!initial.length){routes.active=0;return top;}
+  let records;
+  try {records=await chrome.webNavigation.getAllFrames({tabId});}catch{return top;}
+  if(signal)assertActive(signal);
+  if(!Array.isArray(records))return top;
+  const pending=initial.map(frame=>({frame,parentId:null,depth:0})),seen=new Set(),candidates=[],inspected=[],blocked=[],issues=[];
+  const depthOf=record=>{
+    let depth=0,current=record;
+    while(current&&current.frameId!==0&&depth<=6){depth++;current=records.find(item=>item.frameId===current.parentFrameId);}
+    return current?.frameId===0?depth:Infinity;
+  };
+  let examined=0,unresolved=false;
+  while(pending.length&&examined++<16) {
+    const {frame,parentId,depth}=pending.shift();
+    if(depth>5){unresolved=true;continue;}
+    const source=records.filter(record=>record.frameId!==0&&depthOf(record)<=6&&
+      (parentId===null||record.parentFrameId===parentId)&&
+      (!frame.parentURL||cleanFrameURL(records.find(item=>item.frameId===record.parentFrameId)?.url)===frame.parentURL)&&
+      (cleanFrameURL(record.url)===frame.url||['about','srcdoc','blob','data'].includes(frame.kind)&&
+        record.url.startsWith(frame.kind==='srcdoc'?'about:srcdoc':`${frame.kind}:`)));
+    if(!source.length)unresolved=true;
+    // Frame IDs are not DOM indexes. A repeated URL cannot safely identify
+    // which visible material owns an answer, so never pick an arbitrary match.
+    if(source.length>1)throw new Error('تكرر عنوان إطار الدرس في أكثر من موضع. تعذّر تحديد السؤال الحالي بأمان.');
+    for(const record of source) {
+      if(seen.has(record.frameId))continue;seen.add(record.frameId);
+      const related=/^(?:about:|blob:|data:)/i.test(record.url)&&['about','srcdoc','blob','data'].includes(frame.kind);
+      const effectiveOrigin=frameOrigin(record.url,origin)||(related?frameOrigin(frame.initiatorOrigin||frame.origin,origin):null);
+      if(!effectiveOrigin){unresolved=true;continue;}
+      let permitted=routes.permissions.get(effectiveOrigin);
+      if(permitted===undefined){permitted=await framePermission(effectiveOrigin,origin);routes.permissions.set(effectiveOrigin,permitted);}
+      if(!permitted){if(!blocked.some(item=>item.origin===effectiveOrigin))blocked.push({origin:effectiveOrigin});continue;}
+      const documentKey=`${record.frameId}:${record.documentId||cleanFrameURL(record.url)}`;
+      try {
+        if(!routes.documents.has(documentKey)) {
+          await inject(tabId,origin,record.frameId);routes.documents.add(documentKey);
+        }
+        const controller=runs.get(tabId);
+        if(controller&&routes.controller!==controller){routes.controller=controller;routes.begun.clear();}
+        if(controller&&!routes.begun.has(documentKey)) {
+          if(signal)assertActive(signal);
+          await pageMessage(tabId,{type:'ALEF_BEGIN'},origin,signal,record.frameId);
+          routes.begun.add(documentKey);
+        }
+        const child=await pageMessage(tabId,{type:'ALEF_INSPECT',selectors:config.selectors},origin,signal,record.frameId);
+        inspected.push(child);
+        const nested=(child.frames||[]).filter(item=>item.required===true);
+        for(const inner of nested)pending.push({frame:inner,parentId:record.frameId,depth:depth+1});
+        if(child.question||child.needsPreparation||child.completed||['complete','question'].includes(child.stage)||
+          child.stage==='instruction'&&((child.navigation||[]).length||child.loading)) {
+          candidates.push({frameId:record.frameId,snapshot:child});
+        }
+      }catch(error) {
+        if(signal?.aborted)throw aborted();
+        if(error.fatal)throw error;
+        issues.push('تعذّر الوصول إلى إطار الدرس بعد السماح له. قد يكون ما زال يحمّل أو يستخدم إطارًا معزولًا؛ أعد فحص الدرس.');
+      }
+    }
+  }
+  const state=await getState(tabId);
+  if(blocked.length) {
+    routes.active=0;state.blockedFrames=blocked;
+    state.frameBlockedPage=lessonPageKey(top.page?.url);
+    return {...top,permissionRequired:true,blockedFrames:blocked,
+      diagnostics:[`يحتاج محتوى الدرس إذن Chrome للمصدر: ${blocked.map(item=>item.origin).join('، ')}. اضغط «السماح بمحتوى الدرس» في مُعين.`,...(top.diagnostics||[])]};
+  }
+  const questions=candidates.filter(item=>item.snapshot.question||item.snapshot.needsPreparation);
+  if(questions.length>1)throw new Error('ظهر أكثر من سؤال في إطارات مختلفة. توقف الحل للحفاظ على تطابق الدرس والسؤال.');
+  const selected=questions[0]||candidates.find(item=>item.snapshot.completed||item.snapshot.stage==='complete')||candidates[0];
+  if(!selected) {
+    routes.active=0;
+    // Static instructional HTML can publish progress through the platform SDK
+    // without exposing its own Next or completion marker. Once every required
+    // document is readable and loaded, the parent's enabled ordinary controls
+    // remain authoritative. An unread, loading or unsupported question never
+    // uses this path.
+    const parentNavigation=(top.navigation||[]).filter(action=>['next','finish','back'].includes(action.kind));
+    if(!unresolved&&!pending.length&&!issues.length&&inspected.length&&
+      inspected.every(child=>!child.loading&&['instruction','unknown'].includes(child.stage))&&
+      parentNavigation.some(action=>['next','finish'].includes(action.kind))) {
+      state.blockedFrames=[];
+      return {...top,stage:'instruction',loading:false,framePending:false,navigation:parentNavigation};
+    }
+    // A material frame can mount as about:blank before its actual document is
+    // visible to webNavigation. Let the bounded player-readiness wait handle it.
+    return {...top,loading:true,framePending:true,
+      diagnostics:issues.length?[...issues,...(top.diagnostics||[])]:top.diagnostics};
+  }
+  state.blockedFrames=[];
+  const child=selected.snapshot;
+  if(child.completed||child.stage==='complete') {
+    // Completion inside an embedded material is only a component result. The
+    // parent lesson's ordinary Next/Finish must still publish its progress.
+    routes.active=0;
+    const navigation=(top.navigation||[]).filter(action=>['next','finish','back'].includes(action.kind));
+    return {...top,stage:'instruction',question:null,completed:false,
+      loading:top.loading||!navigation.some(action=>['next','finish'].includes(action.kind)),
+      frameResult:true,navigation};
+  }
+  routes.active=selected.frameId;
+  const navigation=(child.navigation||[]).map(action=>({...action,frameId:selected.frameId,frameFingerprint:child.fingerprint}));
+  navigation.push(...(top.navigation||[]).filter(action=>action.kind==='back').map(action=>({...action,frameId:0,frameFingerprint:top.fingerprint})));
+  const selectedRecord=records.find(record=>record.frameId===selected.frameId);
+  return {...child,page:top.page,subjects:top.subjects,lessons:[],completed:false,navigation,
+    frameContext:{frameId:selected.frameId,origin:frameOrigin(selectedRecord?.url,origin),
+      documentId:selectedRecord?.documentId||null,url:lessonPageKey(child.page?.url||selectedRecord?.url),
+      topPageKey:lessonPageKey(top.page?.url)},
+    fingerprint:`frame:${selected.frameId}:${child.fingerprint}`,diagnostics:child.diagnostics||[]};
 }
 const snapshotKey = snapshot => snapshot?.fingerprint || JSON.stringify([
   snapshot?.stage,snapshot?.question?.id,snapshot?.question?.fingerprint,snapshot?.completed,
@@ -215,6 +364,32 @@ async function prepareCatalog(tabId,initial,config,origin,signal,{expandAll=fals
 }
 const sameQuestion = (snapshot,question) => snapshot?.question?.id === question.id &&
   snapshot.question.fingerprint === question.fingerprint;
+function questionContext(snapshot) {
+  return {...(snapshot.frameContext||{}),frameId:snapshot.frameContext?.frameId||0,
+    topPageKey:lessonPageKey(snapshot.page?.url)};
+}
+async function validateFrameLocation(tabId,context,origin,signal) {
+  assertActive(signal);
+  const tab=await checkedTab(tabId,origin);
+  if(lessonPageKey(tab.url)!==context.topPageKey)throw Object.assign(new Error('تغير الدرس أثناء الحل. لم تُطبّق الإجابة على الصفحة الجديدة.'),{fatal:true});
+  if(context.frameId&&chrome.webNavigation?.getAllFrames) {
+    const frames=await chrome.webNavigation.getAllFrames({tabId});
+    assertActive(signal);
+    const current=frames?.find(frame=>frame.frameId===context.frameId);
+    if(!current||(context.documentId&&current.documentId!==context.documentId)||
+      context.url&&lessonPageKey(current.url)!==context.url) {
+      throw Object.assign(new Error('تغير مستند إطار الدرس أثناء الحل. لم تُطبّق إجابة قديمة.'),{fatal:true});
+    }
+  }
+}
+async function validateQuestionContext(tabId,question,context,config,origin,signal) {
+  await validateFrameLocation(tabId,context,origin,signal);
+  const current=await inspect(tabId,config,origin,signal);
+  if(!sameQuestion(current,question)||(current.frameContext?.frameId||0)!==context.frameId||
+    context.documentId&&current.frameContext?.documentId!==context.documentId) {
+    throw Object.assign(new Error('تغير السؤال الظاهر أثناء الحل. لم تُطبّق الإجابة السابقة.'),{fatal:true});
+  }
+}
 async function waitSnapshot(tabId,config,origin,signal,predicate=()=>true,timeout=12000) {
   const started = Date.now();
   let last;
@@ -231,12 +406,29 @@ async function waitSnapshot(tabId,config,origin,signal,predicate=()=>true,timeou
   }
   return last || {stage:'unknown',question:null,completed:false,navigation:[],lessons:[]};
 }
+function pendingLessonPlayer(snapshot,config) {
+  if(snapshot?.permissionRequired||snapshot?.completed||snapshot?.stage==='complete')return false;
+  // A real question can coexist with a persistent progress bar. That bar must
+  // not turn a ready exercise into an endless loading state.
+  if(snapshot?.stage==='question'&&snapshot.question||snapshot?.needsPreparation)return false;
+  if(snapshot?.framePending)return true;
+  const forward=(snapshot?.navigation||[]).some(action=>
+    ['next','finish'].includes(action.kind)||config.skipInstruction&&action.kind==='skip'||
+    action.kind==='assessment'&&action.sequential===true);
+  if(forward)return false;
+  return snapshot?.loading===true;
+}
 function diagnostic(snapshot,fallback) {
   return snapshot?.diagnostics?.find(item=>typeof item === 'string' && item.trim()) || fallback;
 }
 async function navigate(tabId,snapshot,action,config,origin,signal) {
+  const context=snapshot.frameContext?.frameId===action.frameId?snapshot.frameContext:null;
+  if(action.frameId>0) {
+    await validateFrameLocation(tabId,{...context,frameId:action.frameId,
+      topPageKey:lessonPageKey(snapshot.page?.url)},origin,signal);
+  }
   return pageMessage(tabId,{type:'ALEF_NAVIGATE',actionId:action.id,
-    fingerprint:snapshot.fingerprint,selectors:config.selectors},origin,signal);
+    fingerprint:action.frameFingerprint||snapshot.fingerprint,selectors:config.selectors},origin,signal,action.frameId,context?.documentId);
 }
 async function afterSubmission(tabId,question,config,origin,signal) {
   const started = Date.now();
@@ -303,9 +495,10 @@ async function checkAccuracyBackend(config,signal,requiresVision) {
     throw new Error(config.backendHealth.visionMessage||'النموذج البصري غير جاهز. شغّل START-WINDOWS.cmd من النسخة الجديدة لتجهيزه؛ لم يُرسل السؤال إلى نموذج نصّي.');
   }
 }
-async function captureQuestionImages(tabId,question,config,origin,signal) {
+async function captureQuestionImages(tabId,question,config,origin,signal,context) {
+  await validateQuestionContext(tabId,question,context,config,origin,signal);
   const capture=await pageMessage(tabId,{type:'ALEF_GET_VISUALS',questionId:question.id,
-    questionFingerprint:question.fingerprint,selectors:config.selectors},origin,signal);
+    questionFingerprint:question.fingerprint,selectors:config.selectors},origin,signal,context.frameId,context.documentId);
   if(capture.questionId!==question.id||capture.questionFingerprint!==question.fingerprint ||
     !Array.isArray(capture.images)||!capture.images.length||capture.images.length>3 ||
     capture.images.some(image=>!image||typeof image.data!=='string'||!image.data.length||image.data.length>1_398_104)) {
@@ -349,6 +542,19 @@ async function runLesson(tabId,subject,initial,lesson,config,origin,signal,state
   const answerKey=answer=>answer.optionIds?.length?JSON.stringify([...answer.optionIds].sort()):answer.matches?JSON.stringify([...answer.matches].sort((a,b)=>a.itemId.localeCompare(b.itemId))):(answer.text||'').normalize('NFKC').trim();
   while (true) {
     assertActive(signal);
+    if(snapshot.permissionRequired)return {review:true,blocking:true,snapshot,cause:'frame_permission_required',
+      message:diagnostic(snapshot,'يحتاج محتوى الدرس إذن Chrome. اضغط «السماح بمحتوى الدرس» في مُعين ثم تابع الدرس الحالي.')};
+    if(pendingLessonPlayer(snapshot,config)) {
+      await emit(tabId,'status','انتظار اكتمال تحميل محتوى الدرس…',{phase:'loading'});
+      snapshot=await waitSnapshot(tabId,config,origin,signal,item=>item.permissionRequired||
+        !pendingLessonPlayer(item,config)&&!['unknown','subjects'].includes(item.stage),30000);
+      if(snapshot.permissionRequired)continue;
+      if(pendingLessonPlayer(snapshot,config)||['unknown','subjects'].includes(snapshot.stage)) {
+        return {review:true,blocking:true,snapshot,
+          message:'لم يكتمل تحميل محتوى الدرس خلال 30 ثانية. توقف التشغيل في الدرس الحالي؛ انتظر ظهوره ثم أعد المحاولة.'};
+      }
+      continue;
+    }
     if (snapshot.completed || snapshot.stage === 'complete' ||
       (snapshot.stage === 'lessons' && snapshot.lessons?.some(item=>item.id===lesson.id && item.completed))) {
       return {completed:true,snapshot};
@@ -391,6 +597,7 @@ async function runLesson(tabId,subject,initial,lesson,config,origin,signal,state
     }
     if (snapshot.stage === 'question' && snapshot.question) {
       const question = snapshot.question;
+      const context=questionContext(snapshot);
       const identity = `${question.id}:${question.fingerprint}`;
       if (seenQuestions.has(identity)) return {review:true,snapshot,message:'لم ينتقل الموقع إلى سؤال جديد. راجع نتيجة آخر إرسال.'};
       if (state.stats.total >= 1000) return {review:true,blocking:true,snapshot,message:'وصل التشغيل إلى حد 1000 سؤال. افحص التقدم ثم ابدأ جلسة جديدة.'};
@@ -402,7 +609,7 @@ async function runLesson(tabId,subject,initial,lesson,config,origin,signal,state
       const rejected=rejectedAnswers.get(identity)||[];
       let requestQuestion=rejected.length?{...question,text:question.text+'\n\nPlatform feedback: these previous answers were rejected. Re-evaluate the question carefully. Do not repeat a rejected answer; lower confidence if the question is unclear.\n'+JSON.stringify(rejected.map(answer=>({optionIds:answer.optionIds,text:answer.text,matches:answer.matches})))}:question;
       if(config.qualityMode||question.requiresVision)await checkAccuracyBackend(config,signal,question.requiresVision);
-      if(question.requiresVision)requestQuestion=await captureQuestionImages(tabId,requestQuestion,config,origin,signal);
+      if(question.requiresVision)requestQuestion=await captureQuestionImages(tabId,requestQuestion,config,origin,signal,context);
       const solveStarted=Date.now();
       try { result = await solve(requestQuestion,subject.name,config,signal); }
       catch (error) { error.fatal = true;throw error; }
@@ -416,8 +623,9 @@ async function runLesson(tabId,subject,initial,lesson,config,origin,signal,state
       const solveDurationMs=Date.now()-solveStarted;
       await emit(tabId,'answer',`وصلت الإجابة خلال ${(solveDurationMs/1000).toFixed(1)} ثانية؛ جارٍ مطابقتها مع السؤال الظاهر.`,{question,answer,solveDurationMs});
       assertActive(signal);
+      await validateQuestionContext(tabId,question,context,config,origin,signal);
       const applied = await pageMessage(tabId,{type:'ALEF_APPLY',questionId:question.id,
-        questionFingerprint:question.fingerprint,answer,selectors:config.selectors,autoSubmit:config.autoSubmit},origin,signal);
+        questionFingerprint:question.fingerprint,answer,selectors:config.selectors,autoSubmit:config.autoSubmit},origin,signal,context.frameId,context.documentId);
       if (!applied.submitted) {
         return {review:true,blocking:true,snapshot,question,answer,applied:applied.applied===true,message:applied.reason ||
           'تم اختيار الإجابة. راجعها وأرسلها يدويًا؛ الإرسال التلقائي متوقف.'};
@@ -479,37 +687,44 @@ async function returnToCatalog(tabId,config,origin,signal,state,previous) {
   snapshot = await waitSnapshot(tabId,config,origin,signal,isCatalog,12000);
   return isCatalog(snapshot) ? snapshot : null;
 }
-async function run(tabId,subjectId,config,controller) {
+async function run(tabId,subjectId,config,controller,resumeLessonId=null) {
   const signal = controller.signal;
   const state = await getState(tabId);
   const origin = new URL(state.page.url).origin;
   const subject = state.subjects.find(item=>item.id===subjectId);
   const keepAlive = setInterval(()=>chrome.runtime.getPlatformInfo().catch(()=>{}),20000);
   try {
-    await emit(tabId,'status',`فتح ${subject.name} وجمع الدروس المفتوحة…`);
-    await pageMessage(tabId,{type:'ALEF_SELECT_SUBJECT',subjectId,selectors:config.selectors},origin,signal);
-    await pause(250,signal);
-    let snapshot = await waitSnapshot(tabId,config,origin,signal,item=>!['unknown','subjects'].includes(item.stage));
-    state.catalogClass=coreCatalog(snapshot)?observedCoreClass(snapshot.page?.url):null;
-    // Start with the available tasks instead of paging through a long catalog
-    // before the first answer. Refill the queue before reporting completion.
-    snapshot = await prepareCatalog(tabId,snapshot,config,origin,signal);
-    const catalogMode = snapshot.stage === 'lessons';
-    if (catalogMode) {
-      state.catalogURL = snapshot.page?.url || (await checkedTab(tabId,origin)).url;
-      updateQueue(state,snapshot);
-    } else if (['question','instruction','complete'].includes(snapshot.stage)) {
-      state.queue = [{id:'current-exercise',name:subject.name,status:'pending',implicit:true}];
-      state.stats.lessonsTotal = 1;
+    let snapshot,catalogMode;
+    if(resumeLessonId) {
+      await emit(tabId,'status','متابعة الدرس الحالي بعد السماح بمحتواه…');
+      snapshot=await waitSnapshot(tabId,config,origin,signal,item=>item.permissionRequired||!['unknown','subjects'].includes(item.stage));
+      catalogMode=Boolean(state.catalogURL);
     } else {
-      state.stats.review++;
-      await emit(tabId,'review',diagnostic(snapshot,'لم أجد قائمة دروس أو نشاطًا مدعومًا. افتح صفحة المادة ثم أعد الربط.'),{blocking:true});
-      return;
+      await emit(tabId,'status',`فتح ${subject.name} وجمع الدروس المفتوحة…`);
+      await pageMessage(tabId,{type:'ALEF_SELECT_SUBJECT',subjectId,selectors:config.selectors},origin,signal);
+      await pause(250,signal);
+      snapshot = await waitSnapshot(tabId,config,origin,signal,item=>!['unknown','subjects'].includes(item.stage));
+      state.catalogClass=coreCatalog(snapshot)?observedCoreClass(snapshot.page?.url):null;
+      // Start with the available tasks instead of paging through a long catalog
+      // before the first answer. Refill the queue before reporting completion.
+      snapshot = await prepareCatalog(tabId,snapshot,config,origin,signal);
+      catalogMode = snapshot.stage === 'lessons';
+      if (catalogMode) {
+        state.catalogURL = snapshot.page?.url || (await checkedTab(tabId,origin)).url;
+        updateQueue(state,snapshot);
+      } else if (['question','instruction','complete'].includes(snapshot.stage)||snapshot.permissionRequired) {
+        state.queue = [{id:'current-exercise',name:subject.name,status:'pending',implicit:true}];
+        state.stats.lessonsTotal = 1;
+      } else {
+        state.stats.review++;
+        await emit(tabId,'review',diagnostic(snapshot,'لم أجد قائمة دروس أو نشاطًا مدعومًا. افتح صفحة المادة ثم أعد الربط.'),{blocking:true});
+        return;
+      }
+      await emit(tabId,'queue',`عُثر على ${state.stats.lessonsTotal} درس مفتوح غير مكتمل.`);
     }
-    await emit(tabId,'queue',`عُثر على ${state.stats.lessonsTotal} درس مفتوح غير مكتمل.`);
     for (let lessonLimit=0;lessonLimit<250;lessonLimit++) {
       assertActive(signal);
-      let lesson = state.queue.find(item=>item.status==='pending');
+      let lesson = resumeLessonId?state.queue.find(item=>item.id===resumeLessonId):state.queue.find(item=>item.status==='pending');
       if(!lesson&&catalogMode&&coreCatalog(snapshot)&&snapshot.navigation?.some(item=>item.kind==='expand')) {
         state.currentLesson=null;
         snapshot=await prepareCatalog(tabId,snapshot,config,origin,signal,{expandAll:true});
@@ -527,10 +742,12 @@ async function run(tabId,subjectId,config,controller) {
       }
       lesson.status = 'running';
       state.currentLesson = lesson;
-      await emit(tabId,'lesson',`بدء درس: ${lesson.name}`);
+      const resuming=lesson.id===resumeLessonId;
+      resumeLessonId=null;
+      await emit(tabId,'lesson',`${resuming?'متابعة':'بدء'} درس: ${lesson.name}`);
       let outcome;
       try {
-        if (catalogMode) {
+        if (catalogMode&&!resuming) {
           if (snapshot.stage !== 'lessons') snapshot = await returnToCatalog(tabId,config,origin,signal,state,snapshot);
           if (!snapshot) throw Object.assign(new Error('تعذرت العودة الآمنة إلى قائمة الدروس. افتح قائمة المادة ثم أعد البدء.'),{fatal:true});
           snapshot = await prepareCatalog(tabId,snapshot,config,origin,signal,{targetId:lesson.id});
@@ -554,11 +771,12 @@ async function run(tabId,subjectId,config,controller) {
         await emit(tabId,'lesson',`اكتمل درس: ${lesson.name}`);
       } else {
         lesson.status = 'review';lesson.reason = outcome.message;
+        if(outcome.cause)lesson.reviewCause=outcome.cause;else delete lesson.reviewCause;
         state.stats.review++;state.stats.lessonsReview++;
         // An unresolved lesson is not a successful queue item. Keep the page
         // and all later pending lessons intact so a failed control, loading
         // issue or uncertain answer cannot cause a rapid tour of the course.
-        await emit(tabId,'review',outcome.message,{blocking:true,
+        await emit(tabId,'review',outcome.message,{blocking:true,...(outcome.cause?{cause:outcome.cause}:{}),
           question:outcome.question||snapshot?.question,answer:outcome.answer,
           ...(outcome.applied!==undefined?{applied:outcome.applied,submitted:false}:{})});return;
       }
@@ -593,8 +811,7 @@ async function run(tabId,subjectId,config,controller) {
     }
   } finally {
     clearInterval(keepAlive);
-    runs.delete(tabId);
-    state.running = false;
+    if(runs.get(tabId)===controller){runs.delete(tabId);state.running=false;}
     await saveState(tabId);
   }
 }
@@ -616,16 +833,41 @@ async function handle(message) {
       await checkedTab(tabId,new URL(state.page.url).origin);
       state.running = true;state.status='running';state.subjectId=message.subjectId;
       state.stats=freshStats();state.queue=[];state.currentLesson=null;state.catalogURL=null;state.catalogClass=null;state.events=[];state.lastEvent=null;
+      state.blockedFrames=[];delete state.frameBlockedPage;frameRoutes.delete(tabId);
       const controller = new AbortController();
       runs.set(tabId,controller);
       await saveState(tabId);
       void run(tabId,message.subjectId,config,controller);
       return {ok:true,state};
     }
+    case 'RESUME_FRAMES': {
+      if(runs.has(tabId))throw new Error('الحل يعمل بالفعل لهذا التبويب.');
+      const config=checkedConfig(message.config),state=await getState(tabId);
+      const lesson=state.queue.find(item=>item.id===state.currentLesson?.id);
+      if(!state.page||!lesson||lesson.status!=='review'||lesson.reviewCause!=='frame_permission_required'||!state.blockedFrames.length) {
+        throw new Error('لا يوجد درس متوقف ينتظر إذن المحتوى. أعد فحص صفحة ألف ثم ابدأ الحل.');
+      }
+      const origin=new URL(state.page.url).origin,tab=await checkedTab(tabId,origin);
+      if(state.frameBlockedPage!==lessonPageKey(tab.url))throw new Error('تغيرت صفحة الدرس المتوقف. ارجع إليه قبل السماح بالمتابعة.');
+      for(const entry of state.blockedFrames) {
+        if(frameOrigin(entry.origin,origin)!==entry.origin||!await framePermission(entry.origin,origin)) {
+          throw new Error('لم يُمنح إذن محتوى الدرس بعد. اضغط «السماح بمحتوى الدرس» ووافق في نافذة Chrome.');
+        }
+      }
+      frameRoutes.delete(tabId);
+      lesson.status='pending';delete lesson.reason;delete lesson.reviewCause;
+      state.currentLesson=lesson;state.running=true;state.status='running';state.blockedFrames=[];delete state.frameBlockedPage;
+      state.stats.review=Math.max(0,state.stats.review-1);
+      state.stats.lessonsReview=Math.max(0,state.stats.lessonsReview-1);
+      const controller=new AbortController();runs.set(tabId,controller);
+      await saveState(tabId);
+      void run(tabId,state.subjectId,config,controller,lesson.id);
+      return {ok:true,state};
+    }
     case 'STOP': {
       const controller = runs.get(tabId);
       if (controller) controller.abort();
-      try{await chrome.tabs.sendMessage(tabId,{type:'ALEF_CANCEL'});}catch{}
+      await Promise.allSettled([...routeState(tabId).injected].map(frameId=>chrome.tabs.sendMessage(tabId,{type:'ALEF_CANCEL'},{frameId})));
       await emit(tabId,'stopped','تم إيقاف الحل. راجع صفحة ألف لمعرفة حالة آخر إرسال.');
       return {ok:true,state:await getState(tabId)};
     }
@@ -634,7 +876,7 @@ async function handle(message) {
 }
 chrome.runtime.onMessage.addListener((message,sender,respond) => {
   if (sender.id !== chrome.runtime.id || !sender.url?.startsWith(chrome.runtime.getURL('')) || message?.type === 'RUN_EVENT') return false;
-  if (!['CONNECT','SCAN','GET_STATE','START','STOP','DIAGNOSTICS'].includes(message?.type)) return false;
+  if (!['CONNECT','SCAN','GET_STATE','START','STOP','RESUME_FRAMES','DIAGNOSTICS'].includes(message?.type)) return false;
   handle(message).then(respond,error=>respond({ok:false,error:error.message || 'تعذر تنفيذ الطلب.'}));
   return true;
 });
@@ -644,5 +886,6 @@ chrome.action.onClicked.addListener(tab => {
 chrome.tabs.onRemoved.addListener(tabId => {
   runs.get(tabId)?.abort();
   states.delete(tabId);
+  frameRoutes.delete(tabId);
   void chrome.storage.session.remove(key(tabId));
 });

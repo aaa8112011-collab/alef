@@ -450,6 +450,82 @@ test('restoring a blocked lesson exposes its permission action and active progre
   }finally{await h.close();}
 });
 
+test('unreachable local server check explains the Windows launcher without changing the saved pairing token',async()=>{
+  const token='saved-local-pairing-token-for-connectivity-test';
+  const h=await dashboardHarness({savedToken:token,sessionToken:null});
+  try{
+    const {page}=h;
+    await page.route('http://127.0.0.1:4318/api/health',route=>route.abort('connectionrefused'));
+    await page.locator('.settings-trigger').first().click();
+    await page.locator('#check-server').click();
+    await page.waitForFunction(()=>document.querySelector('#server-status').textContent.includes('START-WINDOWS.cmd'));
+    const status=await page.locator('#server-status').textContent();
+    assert.match(status,/اترك نافذته مفتوحة/);assert.match(status,/رمز الربط وحده لا يشغّل الخادم/);
+    assert.doesNotMatch(status,/Failed to fetch|npm start|API key|SOLVER_API_KEY/);
+    assert.equal(await page.locator('#pairing-token').inputValue(),token);
+    assert.equal(h.stores.local.alefPairingToken,token);
+    assert.equal(await page.locator('#check-server').isEnabled(),true);
+    assert.equal((await page.evaluate(()=>__uiTest.messages)).some(message=>message.type==='START'),false);
+    assert.deepEqual(h.errors,[]);
+  }finally{await h.close();}
+});
+
+test('local health timeout gives the same actionable launcher path without requesting a new token',async()=>{
+  const h=await dashboardHarness({savedToken:'saved-timeout-pairing-token',sessionToken:null});
+  try{
+    const {page}=h;
+    await page.evaluate(()=>{const original=globalThis.fetch;globalThis.fetch=async(...args)=>{
+      if(String(args[0]).endsWith('/api/health'))throw new DOMException('The operation timed out.','TimeoutError');
+      return original(...args);
+    }});
+    await page.locator('.settings-trigger').first().click();await page.locator('#check-server').click();
+    await page.waitForFunction(()=>document.querySelector('#server-status').textContent.includes('انتهت مهلة'));
+    assert.match(await page.locator('#server-status').textContent(),/START-WINDOWS.cmd.*اترك نافذته مفتوحة/);
+    assert.equal(await page.locator('#pairing-token').inputValue(),'saved-timeout-pairing-token');
+    assert.equal(await page.locator('#check-server').isEnabled(),true);
+    assert.deepEqual(h.errors,[]);
+  }finally{await h.close();}
+});
+
+test('offline worker preflight refusal preserves the previous lesson, history and saved token without showing a running session',async()=>{
+  const token='saved-worker-preflight-pairing-token';
+  const h=await dashboardHarness({connected:true,savedToken:token,sessionToken:null});
+  try{
+    const {page}=h;
+    let healthRequests=0;
+    await page.route('http://127.0.0.1:4318/api/health',route=>{healthRequests++;return route.abort('connectionrefused')});
+    await page.evaluate(()=>{
+      const old={kind:'review',sequence:7,running:false,status:'review',message:'الدرس السابق يحتاج مراجعة.',currentLesson:{id:'one',name:'الدرس السابق'},timestamp:Date.now()};
+      Object.assign(__uiTest.state,{subjectId:'math',status:'review',running:false,eventSequence:7,events:[old],lastEvent:old,
+        queue:[{id:'one',name:'الدرس السابق',status:'review'},{id:'two',name:'درس لاحق',status:'pending'}],currentLesson:{id:'one',name:'الدرس السابق'},
+        stats:{solved:0,review:1,total:0,lessonsTotal:2,lessonsCompleted:0,lessonsReview:1}});
+      restoreState(structuredClone(__uiTest.state));
+      const original=chrome.runtime.sendMessage;
+      chrome.runtime.sendMessage=async message=>{
+        if(message.type==='START'){
+          __uiTest.messages.push(structuredClone(message));
+          return {ok:false,error:'تعذر الوصول إلى خادم مُعين المحلي. شغّل START-WINDOWS.cmd من مجلد مُعين واترك نافذته مفتوحة، ثم أعد فحص الاتصال.'};
+        }
+        return original(message);
+      };
+    });
+    await page.locator('#start').click();
+    await page.waitForFunction(()=>document.querySelector('#run-status').textContent==='تعذّر البدء');
+    assert.match(await page.locator('#run-phase').textContent(),/START-WINDOWS.cmd/);
+    assert.equal(await page.locator('#start-label').textContent(),'ابدأ الحل');
+    assert.equal(await page.locator('#start').isEnabled(),true);assert.equal(await page.locator('#stop').isDisabled(),true);
+    assert.equal(await page.locator('#lesson-queue li').count(),2);
+    assert.match(await page.locator('#event-log').textContent(),/الدرس السابق يحتاج مراجعة/);
+    assert.equal(h.stores.local.alefPairingToken,token);
+    const messages=await page.evaluate(()=>__uiTest.messages);
+    assert.equal(messages.filter(message=>message.type==='START').length,1);
+    assert.equal(messages.find(message=>message.type==='START').config.token,token);
+    assert.equal(messages.filter(message=>message.type==='GET_STATE').length,2,'Initial state plus refusal recovery');
+    assert.equal(healthRequests,0,'The worker owns preflight; the dashboard does not duplicate its network probe');
+    assert.deepEqual(h.errors,[]);
+  }finally{await h.close();}
+});
+
 test('server check shows local model readiness without paid credentials and precise missing-runtime/model messages',async()=>{
   const harness=await dashboardHarness();
   try{

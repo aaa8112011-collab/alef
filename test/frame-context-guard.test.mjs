@@ -38,6 +38,7 @@ async function harness(t) {
   vm.runInNewContext(await readFile(new URL('../extension/background.js',import.meta.url),'utf8'),{
     chrome,URL,AbortController,AbortSignal,DOMException,setTimeout,clearTimeout,setInterval,clearInterval,
     fetch:async(url,options)=>{
+      if(url.endsWith('/api/health'))return Response.json({ok:true,configured:true,provider:'ollama',modelReady:true,protocolVersion:2,visionReady:true});
       assert.ok(url.endsWith('/api/solve'));assert.equal(JSON.parse(options.body).question.id,'same-id');solveStarted=true;
       await gate;
       return Response.json({answer:{optionIds:['b'],text:'',explanation:'Protocol fixture.',confidence:.99},verified:false,needsReview:false});

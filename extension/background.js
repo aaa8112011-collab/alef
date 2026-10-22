@@ -8,6 +8,7 @@ async function restrictLocalSettings() {
 void restrictLocalSettings();
 
 const runs = new Map();
+const pendingStarts = new Map();
 const states = new Map();
 const frameRoutes = new Map();
 const reviewMessages = {
@@ -186,7 +187,7 @@ function checkedConfig(input) {
     autoSubmit:input.autoSubmit !== false,skipInstruction:input.skipInstruction !== false,minConfidence:confidence};
 }
 async function connect(tabId,selectors) {
-  if (runs.has(tabId)) throw new Error('أوقف التشغيل قبل إعادة ربط الصفحة.');
+  if (runs.has(tabId)||pendingStarts.has(tabId)) throw new Error('أوقف التشغيل قبل إعادة ربط الصفحة.');
   const tab = await checkedTab(tabId);
   await inject(tabId);
   const snapshot = await pageMessage(tabId,{type:'ALEF_SCAN',selectors},new URL(tab.url).origin);
@@ -416,7 +417,14 @@ function pendingLessonPlayer(snapshot,config) {
     ['next','finish'].includes(action.kind)||config.skipInstruction&&action.kind==='skip'||
     action.kind==='assessment'&&action.sequential===true);
   if(forward)return false;
-  return snapshot?.loading===true;
+  // NCLE mounts its shell before the embedded question and may omit a spinner
+  // during that gap. An empty instruction snapshot is not evidence that the
+  // student must watch a video or interact manually.
+  return snapshot?.loading===true||snapshot?.stage==='instruction';
+}
+function blockedLessonMessage(snapshot) {
+  return snapshot?.diagnostics?.find(message=>typeof message==='string'&&
+    /غير مسند|مقفل|not assigned|(?:^|\W)locked(?:\W|$)/i.test(message));
 }
 function diagnostic(snapshot,fallback) {
   return snapshot?.diagnostics?.find(item=>typeof item === 'string' && item.trim()) || fallback;
@@ -475,6 +483,31 @@ async function solve(question,subject,config,signal) {
     typeof result?.error === 'string' ? result.error : 'تعذر حل السؤال. تحقق من إعدادات الخادم.');
   if (!result || typeof result !== 'object') throw new Error('الخادم لم يُرجع إجابة قابلة للقراءة.');
   return result;
+}
+async function checkLocalService(config,signal) {
+  let response;
+  try {
+    response=await fetch(`${config.serverUrl}/api/health`,{
+      signal:AbortSignal.any([signal,AbortSignal.timeout(7000)]),redirect:'error',
+    });
+  } catch {
+    if(signal.aborted)throw aborted();
+    throw Object.assign(new Error('تعذر الوصول إلى خادم مُعين المحلي. شغّل START-WINDOWS.cmd من مجلد مُعين على D واترك نافذته مفتوحة، ثم أعد فحص الاتصال. رمز الربط وحده لا يشغّل الخادم.'),{code:'local_server_unreachable'});
+  }
+  assertActive(signal);
+  let health;
+  try {health=await response.json();}catch{
+    if(signal.aborted)throw aborted();
+    throw new Error('العنوان المحلي لم يُرجع حالة خادم مُعين. شغّل START-WINDOWS.cmd وتأكد من عنوان الخادم في الإعدادات.');
+  }
+  assertActive(signal);
+  if(!response.ok||health?.ok!==true||!['ollama','openai'].includes(health.provider)) {
+    throw new Error('العنوان المحلي لا يخص خادم مُعين جاهزًا. شغّل START-WINDOWS.cmd ثم أعد فحص الاتصال.');
+  }
+  if(health.configured!==true||health.provider==='ollama'&&health.modelReady!==true) {
+    throw new Error(typeof health.message==='string'&&health.message.trim()?health.message:
+      'الخادم يعمل لكن النموذج غير جاهز. شغّل START-WINDOWS.cmd واتركه حتى يكتمل التجهيز ثم أعد فحص الاتصال.');
+  }
 }
 async function checkAccuracyBackend(config,signal,requiresVision) {
   if (!config.backendHealth) {
@@ -544,14 +577,20 @@ async function runLesson(tabId,subject,initial,lesson,config,origin,signal,state
     assertActive(signal);
     if(snapshot.permissionRequired)return {review:true,blocking:true,snapshot,cause:'frame_permission_required',
       message:diagnostic(snapshot,'يحتاج محتوى الدرس إذن Chrome. اضغط «السماح بمحتوى الدرس» في مُعين ثم تابع الدرس الحالي.')};
+    const blocked=blockedLessonMessage(snapshot);
+    if(blocked)return {review:true,blocking:true,snapshot,cause:'lesson_locked',message:blocked};
     if(pendingLessonPlayer(snapshot,config)) {
-      await emit(tabId,'status','انتظار اكتمال تحميل محتوى الدرس…',{phase:'loading'});
+      const explicitLoading=snapshot.loading===true||snapshot.framePending===true;
+      const timeout=explicitLoading?30000:12000;
+      await emit(tabId,'status',explicitLoading?'انتظار اكتمال تحميل محتوى الدرس…':
+        'انتظار ظهور السؤال أو أدوات متابعة الدرس…',{phase:explicitLoading?'loading':'waiting_controls'});
       snapshot=await waitSnapshot(tabId,config,origin,signal,item=>item.permissionRequired||
-        !pendingLessonPlayer(item,config)&&!['unknown','subjects'].includes(item.stage),30000);
-      if(snapshot.permissionRequired)continue;
+        blockedLessonMessage(item)||!pendingLessonPlayer(item,config)&&!['unknown','subjects'].includes(item.stage),timeout);
+      if(snapshot.permissionRequired||blockedLessonMessage(snapshot))continue;
       if(pendingLessonPlayer(snapshot,config)||['unknown','subjects'].includes(snapshot.stage)) {
         return {review:true,blocking:true,snapshot,
-          message:'لم يكتمل تحميل محتوى الدرس خلال 30 ثانية. توقف التشغيل في الدرس الحالي؛ انتظر ظهوره ثم أعد المحاولة.'};
+          message:explicitLoading?'لم يكتمل تحميل محتوى الدرس خلال 30 ثانية. توقف التشغيل في الدرس الحالي؛ انتظر ظهوره ثم أعد المحاولة.':
+            'تعذّرت قراءة السؤال أو العثور على زر متابعة مفعّل خلال 12 ثانية. بقي التشغيل على الدرس الحالي؛ صدّر فحص الصفحة لتحديد عناصره.'};
       }
       continue;
     }
@@ -641,7 +680,7 @@ async function runLesson(tabId,subject,initial,lesson,config,origin,signal,state
       const kinds = config.skipInstruction ? ['skip','next','finish','assessment'] : ['next','finish','assessment'];
       const action = kinds.map(kind=>snapshot.navigation?.find(item=>item.kind===kind &&
         (kind!=='assessment'||item.sequential===true))).find(Boolean);
-      if (!action) return {review:true,snapshot,message:diagnostic(snapshot,'يتطلب هذا الدرس مشاهدة أو تفاعلًا لا يمكن تجاوزه بزر ظاهر. يحتاج مراجعة يدوية.')};
+      if (!action) return {review:true,snapshot,message:diagnostic(snapshot,'لم يظهر سؤال مدعوم أو زر متابعة مفعّل. بقي التشغيل على الدرس الحالي ولم يُفتح درس آخر.')};
       const identity = `${snapshotKey(snapshot)}:${action.id}`;
       if (clicked.has(identity)) return {review:true,snapshot,message:'لم يتغير الدرس بعد الانتقال. أوقف تكرار الضغط لمراجعة الصفحة.'};
       if (introActions >= 250) return {review:true,snapshot,message:'وصل الدرس إلى حد 250 خطوة في المحتوى. توقّف التشغيل في الدرس الحالي للمراجعة.'};
@@ -823,50 +862,85 @@ async function handle(message) {
     case 'GET_STATE': return {ok:true,state:await getState(tabId)};
     case 'DIAGNOSTICS': {
       const tab=await checkedTab(tabId);
-      return pageMessage(tabId,{type:'ALEF_DIAGNOSTICS'},new URL(tab.url).origin);
-    }
-    case 'START': {
-      if (runs.has(tabId)) throw new Error('الحل يعمل بالفعل لهذا التبويب.');
-      const config = checkedConfig(message.config);
-      const state = await getState(tabId);
-      if (!state.page || !state.subjects.some(item=>item.id===message.subjectId)) throw new Error('اربط صفحة ألف واختر مادة أولًا.');
-      await checkedTab(tabId,new URL(state.page.url).origin);
-      state.running = true;state.status='running';state.subjectId=message.subjectId;
-      state.stats=freshStats();state.queue=[];state.currentLesson=null;state.catalogURL=null;state.catalogClass=null;state.events=[];state.lastEvent=null;
-      state.blockedFrames=[];delete state.frameBlockedPage;frameRoutes.delete(tabId);
-      const controller = new AbortController();
-      runs.set(tabId,controller);
-      await saveState(tabId);
-      void run(tabId,message.subjectId,config,controller);
-      return {ok:true,state};
-    }
-    case 'RESUME_FRAMES': {
-      if(runs.has(tabId))throw new Error('الحل يعمل بالفعل لهذا التبويب.');
-      const config=checkedConfig(message.config),state=await getState(tabId);
-      const lesson=state.queue.find(item=>item.id===state.currentLesson?.id);
-      if(!state.page||!lesson||lesson.status!=='review'||lesson.reviewCause!=='frame_permission_required'||!state.blockedFrames.length) {
-        throw new Error('لا يوجد درس متوقف ينتظر إذن المحتوى. أعد فحص صفحة ألف ثم ابدأ الحل.');
-      }
-      const origin=new URL(state.page.url).origin,tab=await checkedTab(tabId,origin);
-      if(state.frameBlockedPage!==lessonPageKey(tab.url))throw new Error('تغيرت صفحة الدرس المتوقف. ارجع إليه قبل السماح بالمتابعة.');
-      for(const entry of state.blockedFrames) {
-        if(frameOrigin(entry.origin,origin)!==entry.origin||!await framePermission(entry.origin,origin)) {
-          throw new Error('لم يُمنح إذن محتوى الدرس بعد. اضغط «السماح بمحتوى الدرس» ووافق في نافذة Chrome.');
+      const origin=new URL(tab.url).origin;
+      const result=await pageMessage(tabId,{type:'ALEF_DIAGNOSTICS'},origin,undefined,0);
+      const injected=frameRoutes.get(tabId)?.injected;
+      const embedded=[];
+      if(injected?.size>1&&chrome.webNavigation?.getAllFrames) {
+        const records=await chrome.webNavigation.getAllFrames({tabId});
+        for(const record of records||[]) {
+          if(!record.frameId||!injected.has(record.frameId)||embedded.length>=8)continue;
+          const host=frameOrigin(record.url,origin);
+          if(!host||!await framePermission(host,origin))continue;
+          try {
+            const child=await pageMessage(tabId,{type:'ALEF_DIAGNOSTICS'},origin,undefined,record.frameId,record.documentId);
+            embedded.push({frameId:record.frameId,diagnostics:child.diagnostics});
+          } catch {embedded.push({frameId:record.frameId,issue:'تعذرت قراءة أدوات إطار الدرس وقت الفحص.'});}
         }
       }
-      frameRoutes.delete(tabId);
-      lesson.status='pending';delete lesson.reason;delete lesson.reviewCause;
-      state.currentLesson=lesson;state.running=true;state.status='running';state.blockedFrames=[];delete state.frameBlockedPage;
-      state.stats.review=Math.max(0,state.stats.review-1);
-      state.stats.lessonsReview=Math.max(0,state.stats.lessonsReview-1);
-      const controller=new AbortController();runs.set(tabId,controller);
-      await saveState(tabId);
-      void run(tabId,state.subjectId,config,controller,lesson.id);
-      return {ok:true,state};
+      return {...result,diagnostics:{...result.diagnostics,embedded}};
+    }
+    case 'START': {
+      if (runs.has(tabId)||pendingStarts.has(tabId)) throw new Error('الحل يعمل أو يجري فحص تشغيله بالفعل لهذا التبويب.');
+      const config = checkedConfig(message.config);
+      const controller = new AbortController();
+      pendingStarts.set(tabId,controller);
+      try {
+        const state = await getState(tabId);
+        if (!state.page || !state.subjects.some(item=>item.id===message.subjectId)) throw new Error('اربط صفحة ألف واختر مادة أولًا.');
+        const startTab=await checkedTab(tabId,new URL(state.page.url).origin);
+        await checkLocalService(config,controller.signal);
+        assertActive(controller.signal);
+        const currentTab=await checkedTab(tabId,new URL(state.page.url).origin);
+        assertActive(controller.signal);
+        if(lessonPageKey(startTab.url)!==lessonPageKey(currentTab.url))throw new Error('تغيرت صفحة ألف أثناء فحص الخادم. أعد فحص المادة المطلوبة ثم ابدأ الحل.');
+        state.running = true;state.status='running';state.subjectId=message.subjectId;
+        state.stats=freshStats();state.queue=[];state.currentLesson=null;state.catalogURL=null;state.catalogClass=null;state.events=[];state.lastEvent=null;
+        state.blockedFrames=[];delete state.frameBlockedPage;frameRoutes.delete(tabId);
+        runs.set(tabId,controller);
+        pendingStarts.delete(tabId);
+        await saveState(tabId);
+        void run(tabId,message.subjectId,config,controller);
+        return {ok:true,state};
+      } finally {if(pendingStarts.get(tabId)===controller)pendingStarts.delete(tabId);}
+    }
+    case 'RESUME_FRAMES': {
+      if(runs.has(tabId)||pendingStarts.has(tabId))throw new Error('الحل يعمل أو يجري فحص تشغيله بالفعل لهذا التبويب.');
+      const config=checkedConfig(message.config),controller=new AbortController();
+      pendingStarts.set(tabId,controller);
+      try {
+        const state=await getState(tabId);
+        const lesson=state.queue.find(item=>item.id===state.currentLesson?.id);
+        if(!state.page||!lesson||lesson.status!=='review'||lesson.reviewCause!=='frame_permission_required'||!state.blockedFrames.length) {
+          throw new Error('لا يوجد درس متوقف ينتظر إذن المحتوى. أعد فحص صفحة ألف ثم ابدأ الحل.');
+        }
+        const origin=new URL(state.page.url).origin,tab=await checkedTab(tabId,origin);
+        if(state.frameBlockedPage!==lessonPageKey(tab.url))throw new Error('تغيرت صفحة الدرس المتوقف. ارجع إليه قبل السماح بالمتابعة.');
+        for(const entry of state.blockedFrames) {
+          if(frameOrigin(entry.origin,origin)!==entry.origin||!await framePermission(entry.origin,origin)) {
+            throw new Error('لم يُمنح إذن محتوى الدرس بعد. اضغط «السماح بمحتوى الدرس» ووافق في نافذة Chrome.');
+          }
+        }
+        await checkLocalService(config,controller.signal);
+        assertActive(controller.signal);
+        const current=await checkedTab(tabId,origin);
+        assertActive(controller.signal);
+        if(state.frameBlockedPage!==lessonPageKey(current.url))throw new Error('تغيرت صفحة الدرس المتوقف أثناء فحص الخادم. ارجع إليه قبل المتابعة.');
+        frameRoutes.delete(tabId);
+        lesson.status='pending';delete lesson.reason;delete lesson.reviewCause;
+        state.currentLesson=lesson;state.running=true;state.status='running';state.blockedFrames=[];delete state.frameBlockedPage;
+        state.stats.review=Math.max(0,state.stats.review-1);
+        state.stats.lessonsReview=Math.max(0,state.stats.lessonsReview-1);
+        runs.set(tabId,controller);pendingStarts.delete(tabId);
+        await saveState(tabId);
+        void run(tabId,state.subjectId,config,controller,lesson.id);
+        return {ok:true,state};
+      } finally {if(pendingStarts.get(tabId)===controller)pendingStarts.delete(tabId);}
     }
     case 'STOP': {
       const controller = runs.get(tabId);
       if (controller) controller.abort();
+      pendingStarts.get(tabId)?.abort();
       await Promise.allSettled([...routeState(tabId).injected].map(frameId=>chrome.tabs.sendMessage(tabId,{type:'ALEF_CANCEL'},{frameId})));
       await emit(tabId,'stopped','تم إيقاف الحل. راجع صفحة ألف لمعرفة حالة آخر إرسال.');
       return {ok:true,state:await getState(tabId)};
@@ -885,6 +959,7 @@ chrome.action.onClicked.addListener(tab => {
 });
 chrome.tabs.onRemoved.addListener(tabId => {
   runs.get(tabId)?.abort();
+  pendingStarts.get(tabId)?.abort();pendingStarts.delete(tabId);
   states.delete(tabId);
   frameRoutes.delete(tabId);
   void chrome.storage.session.remove(key(tabId));

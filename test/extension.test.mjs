@@ -37,7 +37,7 @@ async function workerBridge(harness, fetchImpl) {
   vm.runInNewContext(source, {
     chrome, URL, AbortController, AbortSignal, DOMException,
     setTimeout, clearTimeout, setInterval, clearInterval,
-    fetch: fetchImpl,
+    fetch: (url,options)=>url.endsWith('/api/health')?Response.json({ok:true,configured:true,provider:'ollama',modelReady:true,protocolVersion:2,visionReady:true}):fetchImpl(url,options),
   }, { filename: 'background.js' });
   return {
     events,

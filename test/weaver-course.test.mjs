@@ -41,6 +41,7 @@ async function workerBridge(h,requests) {
     scripting:{executeScript:async()=>{await h.inject();}},action:{onClicked:{addListener(){}}},
   };
   vm.runInNewContext(source,{chrome,URL,AbortController,AbortSignal,DOMException,setTimeout,clearTimeout,setInterval,clearInterval,fetch:async(_url,options)=>{
+    if(_url.endsWith('/api/health'))return Response.json({ok:true,configured:true,provider:'ollama',modelReady:true,protocolVersion:2,visionReady:true});
     const {question}=JSON.parse(options.body);requests.push(question);
     let answer={optionIds:[],text:'',explanation:'Deterministic local test provider.',confidence:.99};
     if(question.type==='matching')answer.matches=question.items.map(item=>({itemId:item.id,targetId:question.targets.find(target=>target.text==='ماء').id}));

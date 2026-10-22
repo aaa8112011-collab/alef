@@ -330,7 +330,8 @@ async function exportDiagnostics() {
   }catch(error){notice(error.message,true);}
 }
 function checkedUrl(value) {
-  const url = new URL(value);
+  let url;
+  try {url=new URL(value);}catch{throw new Error('استخدم عنوان خادم محلي مثل http://127.0.0.1:4318.');}
   if(url.protocol!=='http:' || !['127.0.0.1','localhost'].includes(url.hostname) || url.username || url.password || url.pathname!=='/' || url.search || url.hash) throw new Error('استخدم عنوان خادم محلي مثل http://127.0.0.1:4318.');
   return url.origin;
 }
@@ -338,7 +339,11 @@ async function checkServer() {
   try {
     $('check-server').disabled=true;$('server-status').textContent='جارٍ الفحص…';
     const url=checkedUrl($('server-url').value);
-    const response=await fetch(`${url}/api/health`,{signal:AbortSignal.timeout(6000)});
+    let response;
+    try {response=await fetch(`${url}/api/health`,{signal:AbortSignal.timeout(6000)});}
+    catch(error){throw new Error(error.name==='TimeoutError'
+      ? 'انتهت مهلة فحص الخادم المحلي. شغّل START-WINDOWS.cmd من مجلد مُعين واترك نافذته مفتوحة، ثم أعد فحص الاتصال.'
+      : 'تعذّر الوصول إلى خادم مُعين المحلي. شغّل START-WINDOWS.cmd من مجلد مُعين واترك نافذته مفتوحة، ثم أعد فحص الاتصال. رمز الربط وحده لا يشغّل الخادم.');}
     if(!response.ok) throw new Error('الخادم رفض الاتصال.');
     const health=await response.json();
     if(health.ok!==true) throw new Error('هذا العنوان لا يخص خادم مُعين.');
@@ -359,7 +364,7 @@ async function checkServer() {
           ? `الخادم يعمل؛ شغّل Ollama وحمّل النموذج ${health.model}، ثم أعد الفحص.`
           : 'الخادم يعمل؛ إعداد الحل غير مكتمل. راجع رسالة التشغيل.';
     return health;
-  }catch(error){$('server-status').textContent=error.name==='TimeoutError'?'انتهت المهلة؛ تأكد من تشغيل npm start.':`تعذر الاتصال: ${error.message}`;return null;}finally{$('check-server').disabled=false;}
+  }catch(error){$('server-status').textContent=error.message;return null;}finally{$('check-server').disabled=false;}
 }
 function openSettings() {
   $('server-url').value=config.serverUrl;
@@ -406,6 +411,7 @@ async function start(type='START') {
   // Event handlers pass a MouseEvent; explicit frame resume passes its type.
   const resume=type==='RESUME_FRAMES';
   const requestRevision=runEventRevision;
+  let attemptedStart=false,startRevision=requestRevision;
   try {
     notice('');
     await pendingPairingSave;
@@ -420,15 +426,21 @@ async function start(type='START') {
       blockedFrames=[];
     }
     $('run-status').textContent='جارٍ البدء';
-    showRunPhase({message:resume?'جارٍ متابعة محتوى الدرس الحالي…':'جارٍ بدء التشغيل وفتح الدرس…'});
+    showRunPhase({message:resume?'فحص الخادم المحلي قبل متابعة الدرس الحالي…':'فحص الخادم المحلي قبل بدء الدرس…'});
     updateButtons();
     const revision=runEventRevision;
+    startRevision=revision;attemptedStart=true;
     const result=await message(resume?'RESUME_FRAMES':'START',{subjectId:selectedSubject,config:{...config,minConfidence:.85}});
     if(runEventRevision===revision)restoreState(result.state);
     startedAt=Date.now();
     const {token,...persistent}=config;
     await chrome.storage.local.set({alefConfig:persistent});
   }catch(error){
+    // A preflight refusal leaves worker state untouched. Restore the prior
+    // queue/history cleared for START, while never replacing newer run events.
+    if(attemptedStart&&runEventRevision===startRevision){
+      try{const result=await message('GET_STATE');if(runEventRevision===startRevision)restoreState(result.state);}catch{}
+    }
     notice(error.message,true);
     if(starting&&runEventRevision===requestRevision&&!running){$('run-status').textContent='تعذّر البدء';showRunPhase({message:error.message});}
   }finally{starting=false;updateButtons();}

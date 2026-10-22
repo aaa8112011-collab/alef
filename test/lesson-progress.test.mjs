@@ -75,7 +75,7 @@ function workerHarness(t,{lagReads=0,introSteps=0,needsReview=false,applyFailure
     scripting:{executeScript:async()=>{}},action:{onClicked:{addListener(){}}},
   };
   vm.runInNewContext(source,{chrome,URL,AbortController,AbortSignal,DOMException,setTimeout,clearTimeout,setInterval,clearInterval,
-    fetch:async()=>Response.json({answer:{optionIds:['b'],text:'',explanation:'مزود اختبار محلي',confidence:needsReview?.4:.99},verified:false,needsReview})});
+    fetch:async url=>url.endsWith('/api/health')?Response.json({ok:true,configured:true,provider:'ollama',modelReady:true,protocolVersion:2,visionReady:true}):Response.json({answer:{optionIds:['b'],text:'',explanation:'مزود اختبار محلي',confidence:needsReview?.4:.99},verified:false,needsReview})});
   const send=message=>new Promise((resolve,reject)=>{
     const accepted=handler({tabId:1,...message},{id:'progress-test',url:'chrome-extension://progress-test/dashboard.html'},resolve);
     if(!accepted)reject(new Error('Worker rejected '+message.type));

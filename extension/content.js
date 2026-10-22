@@ -1,7 +1,7 @@
 (() => {
   'use strict';
-  if (globalThis.__alefAssistantInstalled==='0.5.1') return;
-  globalThis.__alefAssistantInstalled = '0.5.1';
+  if (globalThis.__alefAssistantInstalled==='0.5.2') return;
+  globalThis.__alefAssistantInstalled = '0.5.2';
 
   let selectors = {};
   let subjects = new Map();
@@ -15,8 +15,11 @@
   let frameEntries = new Map();
   const frameLoadStates = new WeakMap();
   let topCourseContext = false;
+  let questionEvidence = null;
+  const inferredOptions = new WeakMap();
   const clean = value => String(value || '').replace(/\s+/g, ' ').trim();
   const WEAVER_QUESTIONS='.mcq-container.question-widget,.dropdown-container.question-widget,.open-ended-container.question-widget,.fib-container.question-widget,.dnd-container.question-widget';
+  const PLAYER_SCOPES='[data-testid="assessment-content-player"],[data-testid="ncle-activity-page-player"],[data-testid="content-page-body-player"]';
   const hash = text => {
     let n = 2166136261;
     for (const c of text) n = Math.imul(n ^ c.charCodeAt(0), 16777619);
@@ -28,7 +31,10 @@
     .replace(/[\u064B-\u065F\u0670\u0640]/g,'').replace(/[أإآ]/g,'ا').replace(/ى/g,'ي')
     .replace(/[\u200b-\u200f\u202a-\u202e]/g,'').replace(/[\s:!؟?.،,·•|]+/g,' ').trim();
   function visible(el) {
-    if (!isElement(el) || !el.isConnected || !el.getClientRects().length) return false;
+    if (!isElement(el) || !el.isConnected) return false;
+    // Layout-only wrappers have no rectangle of their own. Their rendered
+    // children still contain the question/choices, including in display:contents.
+    if (!el.getClientRects().length && (view(el).getComputedStyle(el).display!=='contents' || ![...el.children].some(visible))) return false;
     for (let node=el;node;) {
       if (node.matches('[hidden],[aria-hidden="true"],[inert]')) return false;
       const style=view(node).getComputedStyle(node);
@@ -415,17 +421,52 @@
     return {ok:true,page:{title:document.title,url:location.href},stage,subjects:listedSubjects,lessons:listedLessons,
       question,needsPreparation:!!questionState.needsPreparation,feedback:questionState.feedback,completed,canNext:navigation.some(action=>action.kind==='next'),navigation,fingerprint,...(catalog?{catalog}:{}),
       loading,frames,context:{frame:window!==window.top,documentReadyState:document.readyState},
+      ...(questionEvidence?{questionEvidence:{...questionEvidence}}:{}),
       diagnostics:[...new Set(diagnostics)],capabilities:{text:true,single:true,multiple:true,images:true,visionCapture:true,dragAndDrop:true,customSelectors:true,courseNavigation:true,frameContext:true}};
   }
   const scan=()=>inspect();
   function questionContainer() {
     let found=all(selectors.question||'[data-alef-question],[data-question-id],[data-testid="question-renderer"],[data-testid="new-question-renderer"],'+WEAVER_QUESTIONS);
     if(!found.length&&!selectors.question)found=all('fieldset,[role="radiogroup"],[role="group"][aria-labelledby],[role="selectgroup"][aria-labelledby]').filter(el=>el.querySelector('input,textarea,select,[role="radio"],[role="checkbox"],[data-alef-item]'));
+    if(!found.length&&!selectors.question)return playerChoiceContainer();
     found=uniqueNodes(found);
     if(found.length>1)throw new Error('توجد عدة أسئلة ظاهرة. تعذّر تحديد السؤال الحالي بأمان.');
+    if(found[0])inferredOptions.delete(found[0]);
+    return found[0]||null;
+  }
+  function playerChoiceContainer() {
+    if(loginPage())return null;
+    const scopes=all(PLAYER_SCOPES);
+    // Prefer the innermost platform player rather than its course/sidebar shell.
+    const active=scopes.filter(scope=>!scopes.some(other=>other!==scope&&scope.contains(other)));
+    if(!active.length&&topCourseContext&&document.body)active.push(document.body);
+    const primary=all('button,[role="button"],input[type="submit"]').filter(node=>
+      /^(submit|submit answer|check|check answer|confirm answer|try again|next|next question|continue|done|finish|ارسال|ارسال الاجابة|تحقق|تحقق من الاجابة|تاكيد الاجابة|حاول مرة اخري|حاول مجددا|التالي|متابعة|استمرار|انهاء)$/.test(norm(text(node)||node.value)));
+    const found=[];
+    let unreadable=false;
+    for(const scope of active) {
+      const controls=all('input[type="radio"],input[type="checkbox"],[role="radio"],[role="checkbox"]',scope);
+      if(!controls.length||!primary.some(node=>node.ownerDocument===scope.ownerDocument&&(scope.contains(node)||active.length===1)))continue;
+      questionEvidence={source:'player-choices',choiceCount:controls.length,scope:scope.getAttribute('data-testid')||'embedded-lesson',recognizedAction:true};
+      const native=controls.filter(node=>node.matches('input[type="radio"]'));
+      const semantic=controls.filter(node=>node.matches('[role="radio"]')&&!node.matches('input'));
+      let options;
+      if(native.length===controls.length) {
+        const name=native[0].name;
+        if(name&&native.length>=2&&native.every(node=>node.name===name&&node.form===native[0].form)&&
+          native.every(node=>clean([...node.labels||[]].map(text).join(' ')||node.getAttribute('aria-label'))))options=native;
+      } else if(semantic.length===controls.length&&semantic.length>=2&&
+        semantic.every(node=>node.parentElement===semantic[0].parentElement&&clean(text(node)||node.getAttribute('aria-label'))))options=semantic;
+      if(!options){unreadable=true;continue;}
+      inferredOptions.set(scope,options);found.push(scope);
+    }
+    if(found.length>1||unreadable&&found.length)throw new Error('توجد مجموعات إجابة متعددة داخل المشغّل؛ تعذّر ربط كل مجموعة بسؤالها بأمان.');
+    if(unreadable)throw new Error('تظهر خيارات إجابة في الدرس، لكن مجموعتها أو تسمياتها غير واضحة للقارئ. لم تُرسل إجابة؛ صدّر فحص الصفحة لتحديد أدوات هذا السؤال.');
+    if(found.length)questionEvidence={...questionEvidence,source:inferredOptions.get(found[0])[0].matches('input')?'native-player-radio':'semantic-player-radio'};
     return found[0]||null;
   }
   function optionNodes(container) {
+    if(inferredOptions.has(container))return inferredOptions.get(container).filter(visible);
     const marked=all(selectors.option||'[data-alef-option],[data-testid="choice-item"],[data-testid="mcq-option-container"]',container);
     if(marked.length){const attempts=all('div[data-testid^="attempt-"]',container).filter(node=>node.querySelector('[data-testid="choice-item"]'));const active=attempts.at(-1);return active?marked.filter(node=>active.contains(node)):marked;}
     return all('input[type="radio"],input[type="checkbox"],[role="radio"],[role="checkbox"]',container);
@@ -845,10 +886,27 @@
   function diagnostics(){
     const snapshot=inspect();
     const cleanUrl=value=>{try{const url=new URL(value,location.href);return url.origin+url.pathname+(url.hash.startsWith('#/')?url.hash.split('?')[0]:'');}catch{return '';}};
-    return {ok:true,diagnostics:{version:'0.5.1',page:{url:cleanUrl(location.href)},stage:snapshot.stage,subjects:snapshot.subjects,lessons:snapshot.lessons.map(({href,...lesson})=>({...lesson,href:href?cleanUrl(href):undefined})),navigation:snapshot.navigation,issues:snapshot.diagnostics,frames:snapshot.frames,loading:snapshot.loading,controls:all('button,[role="button"],[data-testid]').filter(node=>!node.closest('form')&&!node.matches('input,textarea')).slice(0,100).map(node=>({tag:node.tagName,role:node.getAttribute('role'),testId:node.getAttribute('data-testid'),classes:[...node.classList].slice(0,6),label:clean(node.getAttribute('aria-label')|| (node.matches('button,[role="button"]')?text(node):'')).slice(0,100)}))}};
+    const login=loginPage();
+    const inPlayer=node=>!!node.closest(PLAYER_SCOPES)||topCourseContext&&!login;
+    const safeForm=node=>!node.closest('form')||inPlayer(node)&&!login;
+    const controls=all('button,[role="button"],[role="radio"],[role="checkbox"],[role="radiogroup"],[role="combobox"],[data-testid]')
+      .filter(node=>safeForm(node)&&!node.matches('input,textarea')).sort((a,b)=>Number(inPlayer(b))-Number(inPlayer(a)));
+    const choices=all('input[type="radio"],input[type="checkbox"],[role="radio"],[role="checkbox"]').filter(node=>inPlayer(node)&&safeForm(node));
+    return {ok:true,diagnostics:{version:'0.5.2',page:{url:cleanUrl(location.href)},stage:snapshot.stage,
+      subjects:snapshot.subjects,lessons:snapshot.lessons.map(({href,...lesson})=>({...lesson,href:href?cleanUrl(href):undefined})),
+      navigation:snapshot.navigation,issues:snapshot.diagnostics,frames:snapshot.frames,loading:snapshot.loading,
+      ...(snapshot.questionEvidence?{questionEvidence:snapshot.questionEvidence}:{}),
+      questionControls:{visibleChoices:choices.length,nativeRadio:choices.filter(node=>node.matches('input[type="radio"]')).length,
+        nativeCheckbox:choices.filter(node=>node.matches('input[type="checkbox"]')).length,
+        semanticRadio:choices.filter(node=>node.matches('[role="radio"]')).length,
+        semanticCheckbox:choices.filter(node=>node.matches('[role="checkbox"]')).length,
+        playerScopes:all(PLAYER_SCOPES).map(node=>node.getAttribute('data-testid'))},
+      controls:controls.slice(0,100).map(node=>({tag:node.tagName,role:node.getAttribute('role'),testId:node.getAttribute('data-testid'),
+        classes:[...node.classList].slice(0,6),disabled:disabled(node),
+        label:node.matches('button,[role="button"]')?clean(text(node)||node.getAttribute('aria-label')).slice(0,100):''}))}};
   }
   function handle(message){
-    rootsCache=null;frameEntries=new Map();topCourseContext=message.topCourseContext===true;settings(message.selectors);
+    rootsCache=null;frameEntries=new Map();questionEvidence=null;topCourseContext=message.topCourseContext===true;settings(message.selectors);
     switch(message.type){
       case 'ALEF_SCAN':case 'ALEF_INSPECT':return inspect();
       case 'ALEF_DIAGNOSTICS':return diagnostics();

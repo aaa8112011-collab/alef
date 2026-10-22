@@ -107,7 +107,7 @@ async function setup(t,{granted=true,holdSolve=false,sameOrigin=false}={}){
     action:{onClicked:{addListener(){}}},
   };
   vm.runInNewContext(await readFile(new URL('../extension/background.js',import.meta.url),'utf8'),{chrome,URL,AbortController,AbortSignal,DOMException,setTimeout,clearTimeout,setInterval,clearInterval,fetch:async(url,options)=>{
-    if(url.endsWith('/api/health'))return Response.json({ok:true,protocolVersion:2,visionReady:true});
+    if(url.endsWith('/api/health'))return Response.json({ok:true,configured:true,provider:'ollama',modelReady:true,protocolVersion:2,visionReady:true});
     assert.ok(url.endsWith('/api/solve'),String(url));const {question}=JSON.parse(options.body);requests.push(structuredClone(question));
     assert.match(question.text,/2 \+ 2/,'The child question must reach the solver');
     await solveGate;
@@ -304,4 +304,16 @@ for(const wrapperKind of ['http','srcdoc'])test(`a required cross-origin lesson 
   const child=h.injected.find(row=>row.url===h.childOrigin+'/lesson/one');assert.ok(child);
   assert.ok(h.messages.some(message=>message.type==='ALEF_APPLY'&&message.frameId===child.frameId));
   assert.equal(h.injected.some(row=>row.url.endsWith('/help')),false);
+});
+
+test('page diagnostics include controls from the active lesson frame without exporting question images',async t=>{
+  const h=await setup(t,{holdSolve:true});await h.start();
+  await waitFor(h,event=>event.kind==='question');
+  const result=await h.send({type:'DIAGNOSTICS'});assert.equal(result.ok,true);
+  assert.equal(result.diagnostics.stage,'instruction','The parent shell remains distinct from its embedded question');
+  const child=result.diagnostics.embedded.find(item=>item.diagnostics?.stage==='question');assert.ok(child,JSON.stringify(result));
+  assert.ok(child.frameId>0);
+  assert.ok(child.diagnostics.controls.some(control=>control.label==='Submit Answer'));
+  assert.doesNotMatch(JSON.stringify(result),/test-frame-local-only|data:image|base64,/);
+  await h.send({type:'STOP'});h.releaseSolve();
 });

@@ -1,7 +1,7 @@
 (() => {
   'use strict';
-  if (globalThis.__alefAssistantInstalled==='0.5.7') return;
-  globalThis.__alefAssistantInstalled = '0.5.7';
+  if (globalThis.__alefAssistantInstalled==='0.5.8') return;
+  globalThis.__alefAssistantInstalled = '0.5.8';
 
   let selectors = {};
   let subjects = new Map();
@@ -11,6 +11,7 @@
   let fillCache = null;
   let weaverDragCache = null;
   let cancelled = false;
+  let lastDiagnosticInteraction = null;
   // A scan is synchronous and read-only. Share expensive DOM/style lookups
   // within that scan, then discard them before any click or asynchronous wait.
   let readPass = null;
@@ -1039,7 +1040,9 @@
       }
     }
     if(menus.length>1)throw new Error('تعذّر تحديد قائمة الإجابة الحالية.');
-    const options=menus.flatMap(menu=>[...menu.querySelectorAll(DROPDOWN_OPTIONS)]).filter(node=>visible(node)&&!disabled(node));
+    // K4 adds a Cancel action to the menu with role=option, but its handler
+    // explicitly ignores it as an answer. Keep that action out of the solver.
+    const options=menus.flatMap(menu=>[...menu.querySelectorAll(DROPDOWN_OPTIONS)]).filter(node=>visible(node)&&!disabled(node)&&!node.matches('.dropdown-item-cancel'));
     // A busy menu may expose an incomplete first batch of answers.
     return menus.some(menu=>menu.matches('[aria-busy="true"]'))?[]:options;
   }
@@ -1075,7 +1078,11 @@
   function dropdownSelected(control,desired){
     if(control.getAttribute('aria-expanded')==='true')return false;
     const wrapper=control.closest('[data-testid="selectableChoice"],.dropdown-input-field-container,[class*="__control"]')||control.parentElement;
-    const displays=[...wrapper.querySelectorAll('.dropdown-single-value-content,[class*="__single-value"]')].filter(visible);
+    // Weaver's authored label sits inside React Select's __single-value.
+    // Those are two nested nodes for one chosen answer, not two selections.
+    const authored=[...wrapper.querySelectorAll('.dropdown-single-value-content')].filter(visible);
+    if(authored.length)return authored.length===1&&text(authored[0])===desired;
+    const displays=[...wrapper.querySelectorAll('[class*="__single-value"]')].filter(node=>visible(node)&&!node.querySelector('[class*="__single-value"]'));
     if(displays.length)return displays.length===1&&text(displays[0])===desired;
     if(clean(control.getAttribute('aria-valuetext'))===desired)return true;
     // Search input values alone do not acknowledge a chosen option. The
@@ -1128,6 +1135,7 @@
   }
   async function applyMatching(question,answer,message){
     const original=matchingControls(questionContainer());
+    let lastMouseReleaseAt=null;
     if(!Array.isArray(answer.matches)||answer.matches.length!==original.items.length)throw new Error('مطابقة الإجابات غير مكتملة.');
     const used=new Set(),targets=new Set();
     for(const pair of answer.matches){if(used.has(pair.itemId)||targets.has(pair.targetId)||!original.items.some(item=>item.id===pair.itemId)||!original.targets.some(item=>item.id===pair.targetId))throw new Error('أزواج المطابقة غير صالحة.');used.add(pair.itemId);targets.add(pair.targetId);}
@@ -1174,7 +1182,7 @@
           moveToBlank();
           await waitAcknowledged(question,()=>{const {blank,moved}=moveToBlank();return !moved&&blank.classList.contains('is-about-to-drop');},'لم يؤكد الموقع موضع إسقاط الكلمة.');
           assertNotCancelled();assertQuestion(question);
-          doc.dispatchEvent(mouse('mouseup',end,0));released=true;
+          doc.dispatchEvent(mouse('mouseup',end,0));released=true;lastMouseReleaseAt=performance.now();
           await waitAcknowledged(question,()=>weaverBlankHasWord(matchingControls(questionContainer())?.items.find(row=>row.id===pair.itemId)?.node,target.text),'لم يؤكد الموقع وضع الكلمة في الفراغ.');
         }finally{
           if(!released){doc.dispatchEvent(new realm.KeyboardEvent('keydown',{key:'Escape',code:'Escape',bubbles:true,cancelable:true}));doc.dispatchEvent(mouse('mouseup',start,0));}
@@ -1196,6 +1204,15 @@
       });
     };
     await waitAcknowledged(question,allMatchesPlaced,wordAcknowledged?'لم يؤكد الموقع تثبيت جميع الكلمات في فراغاتها الصحيحة.':'لم يؤكد الموقع تثبيت جميع أزواج المطابقة.');
+    // DndKit keeps its capture-phase click suppression for 50 ms after a
+    // MouseSensor ends. A ready-looking Submit click inside that window is
+    // swallowed before the application's handler sees it. Wait only for our
+    // latest mouse release, then recheck cancellation and the current mapping.
+    if(message.autoSubmit&&lastMouseReleaseAt!==null){
+      const remaining=75-(performance.now()-lastMouseReleaseAt);
+      if(remaining>0)await delay(remaining);
+      assertNotCancelled();assertQuestion(question);
+    }
     return submitAnswer(question,message,allMatchesPlaced);
   }
   async function chooseCustomDropdown(question,options,optionId,fieldId=null){
@@ -1289,6 +1306,51 @@
     }
     return submitAnswer(question,message,acknowledged);
   }
+  function interactionDiagnostics(snapshot){
+    let container=null;
+    try{if(!loginPage())container=questionContainer();}catch{}
+    const empty={questionVisible:false,questionType:snapshot.question?.type||null,dropdowns:[],textFields:[],drag:{sources:0,targets:0},menus:[]};
+    if(!container)return empty;
+    // Record structure and anonymous relationships only. DOM IDs, accessible
+    // labels, option text and input values can contain account or answer data.
+    const references=new WeakMap();let nextReference=1;
+    const reference=node=>{if(!references.has(node))references.set(node,`node-${nextReference++}`);return references.get(node);};
+    const knownClasses=new Set(['dropdown-input-field-container','dropdown-field-wrapper','dropdown-input-field-wrapper',
+      'dropdown-container','question-widget','dropdown-item','dropdown-item-cancel','dropdown-single-value',
+      'dropdown-single-value-content','is-selected','is-focused','is-correct','is-incorrect','is-inline','rtl','k4',
+      'dnd-container','dnd-droppable','dnd-options-draggable','is-dragging','is-about-to-drop','open-ended-container','fib-container']);
+    const classes=node=>[...new Set([...node.classList].flatMap(value=>knownClasses.has(value)?[value]:
+      /__(?:control|menu|menu-list|option|input|single-value|indicators)$/.test(value)?[value.slice(value.lastIndexOf('__'))]:
+        /^css-/.test(value)?['generated-css']:[]))].slice(0,8);
+    const roles=new Set(['combobox','listbox','option','textbox','radio','checkbox','button','group','radiogroup','selectgroup']);
+    const describe=node=>({ref:reference(node),tag:node.tagName,role:roles.has(node.getAttribute('role'))?node.getAttribute('role'):null,
+      classes:classes(node),hasId:!!node.id,hasTestId:node.hasAttribute('data-testid'),visible:visible(node)});
+    const controls=all('select,[role="combobox"]',container).slice(0,20),menuOwners=new Map();
+    const dropdowns=controls.map((node,index)=>{
+      const root=node.getRootNode(),ids=clean([node.getAttribute('aria-controls'),node.getAttribute('aria-owns')].filter(Boolean).join(' ')).split(' ').filter(Boolean);
+      const linked=[...new Set(ids.map(id=>root.getElementById?.(id)).filter(isElement))];
+      for(const menu of linked){if(!menuOwners.has(menu))menuOwners.set(menu,[]);menuOwners.get(menu).push(index+1);}
+      const ancestors=[];for(let parent=node.parentElement;parent&&parent!==container&&ancestors.length<3;parent=parent.parentElement)ancestors.push(describe(parent));
+      return {...describe(node),index:index+1,disabled:disabled(node),readOnly:node.readOnly===true,
+        expanded:node.getAttribute('aria-expanded')==='true',focused:root.activeElement===node,
+        nativeOptions:node.tagName==='SELECT'?node.options.length:null,
+        linkedMenuCount:linked.length,unresolvedReferences:Math.max(0,new Set(ids).size-linked.length),
+        menuRefs:linked.map(reference),ancestors};
+    });
+    const menuNodes=new Set(menuOwners.keys());
+    for(const root of new Set(controls.map(node=>node.getRootNode())))for(const menu of root.querySelectorAll('[role="listbox"],[class*="__menu-list"]'))if(visible(menu)&&menuNodes.size<30)menuNodes.add(menu);
+    const menus=[...menuNodes].slice(0,30).map(node=>({...describe(node),ownerFields:menuOwners.get(node)||[],busy:node.getAttribute('aria-busy')==='true',
+      semanticOptions:all('[role="option"]',node).length,weaverOptions:all('.dropdown-item:not(.dropdown-item-cancel)',node).length,
+      cancelOptions:all('.dropdown-item-cancel',node).length}));
+    const textFields=all('input:not([type="hidden"]),textarea,[contenteditable="true"],math-field',container)
+      .filter(node=>!node.matches('[role="combobox"],input[type="radio"],input[type="checkbox"]')).slice(0,20)
+      .map(node=>({...describe(node),type:node.tagName==='INPUT'&&['text','number','search','email','password','tel','url'].includes(node.type)?node.type:null,
+        disabled:disabled(node),readOnly:node.readOnly===true,contentEditable:node.getAttribute('contenteditable')==='true',
+        valid:node.validity?.valid??null}));
+    return {questionVisible:true,questionType:snapshot.question?.type||null,dropdowns,textFields,menus,
+      drag:{sources:all('.dnd-options-draggable,[data-alef-item],[data-testid="draggableChoice"]',container).length,
+        targets:all('.dnd-droppable,[data-alef-target],[data-testid^="fill-blank-dd-"]',container).length}};
+  }
   function diagnostics(){
     const started=performance.now();
     const snapshot=inspect();
@@ -1307,10 +1369,13 @@
       appRoots:[...document.querySelectorAll('#root,#app,app-root,[data-reactroot],main')].slice(0,8).map(node=>({
         tag:node.tagName,kind:node.matches('#root')?'root':node.matches('#app')?'app':node.matches('main')?'main':'app-root',
         children:node.childElementCount,visible:visible(node)}))};
-    return {ok:true,diagnostics:{version:'0.5.7',page:{url:cleanUrl(location.href)},stage:snapshot.stage,rendering,
+    return {ok:true,diagnostics:{version:'0.5.8',page:{url:cleanUrl(location.href)},stage:snapshot.stage,rendering,
       subjects:snapshot.subjects,lessons:snapshot.lessons.map(({href,...lesson})=>({...lesson,href:href?cleanUrl(href):undefined})),
       navigation:snapshot.navigation,issues:snapshot.diagnostics,frames:snapshot.frames,loading:snapshot.loading,
       ...(snapshot.questionEvidence?{questionEvidence:snapshot.questionEvidence}:{}),
+      interactionStructure:interactionDiagnostics(snapshot),
+      lastInteraction:lastDiagnosticInteraction?{operation:lastDiagnosticInteraction.operation,status:lastDiagnosticInteraction.status,
+        durationMs:lastDiagnosticInteraction.durationMs??Math.max(0,Math.round(performance.now()-lastDiagnosticInteraction.startedAt)),cancelled}:null,
       questionControls:{visibleChoices:choices.length,nativeRadio:choices.filter(node=>node.matches('input[type="radio"]')).length,
         nativeCheckbox:choices.filter(node=>node.matches('input[type="checkbox"]')).length,
         semanticRadio:choices.filter(node=>node.matches('[role="radio"]')).length,
@@ -1348,7 +1413,12 @@
   }
   chrome.runtime.onMessage.addListener((message,sender,respond)=>{
     if(sender.id!==chrome.runtime.id||!message?.type?.startsWith('ALEF_'))return false;
-    try{const result=handle(message);if(result?.then){result.then(respond,error=>respond({ok:false,error:error.message||'تعذر التفاعل مع الصفحة.'}));return true;}respond(result);}
-    catch(error){respond({ok:false,error:error.message||'تعذر قراءة عناصر الصفحة.'});}return false;
+    if(message.type==='ALEF_BEGIN')lastDiagnosticInteraction=null;
+    const operation={ALEF_PREPARE_QUESTION:'prepare-question',ALEF_APPLY:'apply-answer',ALEF_GET_VISUALS:'capture-visuals'}[message.type];
+    const record=operation?{operation,status:'running',startedAt:performance.now()}:null;
+    if(record)lastDiagnosticInteraction=record;
+    const finish=status=>{if(record){record.status=status;record.durationMs=Math.max(0,Math.round(performance.now()-record.startedAt));}};
+    try{const result=handle(message);if(result?.then){result.then(value=>{finish(value?.ok===false?'failed':'succeeded');respond(value);},error=>{finish('failed');respond({ok:false,error:error.message||'تعذر التفاعل مع الصفحة.'});});return true;}finish(result?.ok===false?'failed':'succeeded');respond(result);}
+    catch(error){finish('failed');respond({ok:false,error:error.message||'تعذر قراءة عناصر الصفحة.'});}return false;
   });
 })();

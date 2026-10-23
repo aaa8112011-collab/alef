@@ -1030,7 +1030,14 @@ async function handle(message) {
           ...(reviewEvent.answer?{answer:{optionIds:reviewEvent.answer.optionIds||[],text:reviewEvent.answer.text||'',
             ...(reviewEvent.answer.selections?{selections:reviewEvent.answer.selections.map(({fieldId,optionId})=>({fieldId,optionId}))}:{}),
             explanation:reviewEvent.answer.explanation||'',confidence:reviewEvent.answer.confidence}}:{})}:null};
-      return {...result,diagnostics:{...result.diagnostics,embedded,runResult}};
+      let workerVersion=null;
+      try{workerVersion=chrome.runtime.getManifest?.().version||null;}catch{}
+      const contentVersion=typeof result.diagnostics?.version==='string'?result.diagnostics.version:null;
+      const versions={worker:workerVersion,content:contentVersion,
+        consistent:workerVersion&&contentVersion?workerVersion===contentVersion:null,
+        embedded:embedded.filter(item=>item.diagnostics).map(item=>({frameId:item.frameId,content:item.diagnostics.version||null,
+          consistent:workerVersion&&item.diagnostics.version?workerVersion===item.diagnostics.version:null}))};
+      return {...result,diagnostics:{...result.diagnostics,versions,embedded,runResult}};
     }
     case 'START': {
       if (runs.has(tabId)||pendingStarts.has(tabId)) throw new Error('الحل يعمل أو يجري فحص تشغيله بالفعل لهذا التبويب.');

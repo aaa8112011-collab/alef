@@ -625,6 +625,25 @@ test('answers identify their subject and lesson, distinguish submission, and cle
  }finally{await harness.close();}
 });
 
+for(const language of ['ar','en'])test(`${language}: multiple dropdown answers retain each field's own option label and hide internal prompt markers`,async()=>{
+ const h=await dashboardHarness({connected:true});
+ try{
+  await h.page.evaluate(language=>{
+   const question={id:'two-dropdowns',fingerprint:'two-dropdowns',type:'dropdowns',requiresVision:true,
+     text:language==='ar'?'قياس الزاوية [dropdown:angle] والمثلثان [dropdown:relation]':'The angle is [dropdown:angle] and the triangles [dropdown:relation]',
+     fields:[{id:'angle',text:(language==='ar'?'القائمة 1':'Dropdown 1')+' [dropdown:angle]',options:[{id:'shared',text:'70°'}]},
+       {id:'relation',text:(language==='ar'?'القائمة 2':'Dropdown 2')+' [dropdown:relation]',options:[{id:'shared',text:language==='ar'?'متشابهان':'are similar'}]}],options:[]};
+   __uiTest.emit({kind:'question',question,message:'سؤال بقائمتين'});
+   __uiTest.emit({kind:'answer',question,answer:{optionIds:[],text:'',selections:[{fieldId:'relation',optionId:'shared'},{fieldId:'angle',optionId:'shared'}],explanation:'إجابة اختبار محلي',confidence:.99},message:'تطبيق'});
+  },language);
+  assert.equal(await h.page.locator('#answer-label').textContent(),'الإجابة المقترحة');
+  assert.equal(await h.page.locator('#answer-text').textContent(),language==='ar'?'القائمة 2 ← متشابهان\nالقائمة 1 ← 70°':'Dropdown 2 ← are similar\nDropdown 1 ← 70°');
+  const displayed=await h.page.locator('#question-text').textContent();
+  assert.equal(displayed.includes('dropdown:'),false);assert.ok(displayed.includes(language==='ar'?'[القائمة 1]':'[Dropdown 1]'));
+  assert.equal(await h.page.locator('#question-media-note').isVisible(),true);
+ }finally{await h.close();}
+});
+
 test('fast retry attempts are labelled separately without a model confidence or a recovered-score claim',async()=>{
  const h=await dashboardHarness({connected:true});
  try{

@@ -169,6 +169,9 @@ function clearAnswer({resetLesson=false}={}) {
   $('question-label').textContent='السؤال الحالي';
   $('answer-label').textContent='الإجابة المقترحة';
 }
+function dropdownLabel(field) {
+  return (field?.text||'').replace(/\[dropdown:[^\]\r\n]+\]/g,'').trim()||'قائمة الإجابة';
+}
 function showAnswer(event) {
   const lesson=typeof event.currentLesson==='string'?{name:event.currentLesson}:event.currentLesson;
   const lessonKey=lesson&&(lesson.id||lesson.name);
@@ -183,7 +186,8 @@ function showAnswer(event) {
     const changed=displayedQuestion&&(event.question.id!==displayedQuestion.id||event.question.fingerprint!==displayedQuestion.fingerprint||event.question.text!==displayedQuestion.text);
     if(event.kind==='question'||changed)clearAnswer();
     displayedQuestion=event.question;
-    $('question-text').textContent=event.question.text;
+    $('question-text').textContent=(event.question.text||'').replace(/\[dropdown:([^\]\r\n]+)\]/g,(_marker,id)=>
+      `[${dropdownLabel(event.question.fields?.find(field=>field.id===id))}]`);
     $('question-media-note').hidden=event.question.requiresVision!==true;
     $('answer-empty').hidden=true;$('answer-content').hidden=false;
   }
@@ -199,7 +203,11 @@ function showAnswer(event) {
     const question=event.question||displayedQuestion;
     const selected = question?.options?.filter(option=>event.answer.optionIds?.includes(option.id)).map(option=>option.text) || [];
     const pairs=event.answer.matches?.map(pair=>`${question?.items?.find(item=>item.id===pair.itemId)?.text||pair.itemId} ← ${question?.targets?.find(item=>item.id===pair.targetId)?.text||pair.targetId}`)||[];
-    const answerText=pairs.length?pairs.join('\n'):selected.length?selected.join('، '):(event.answer.text||'').trim();
+    const fields=event.answer.selections?.map(selection=>{
+      const field=question?.fields?.find(field=>field.id===selection.fieldId);
+      return `${dropdownLabel(field)} ← ${field?.options?.find(option=>option.id===selection.optionId)?.text||selection.optionId}`;
+    })||[];
+    const answerText=fields.length?fields.join('\n'):pairs.length?pairs.join('\n'):selected.length?selected.join('، '):(event.answer.text||'').trim();
     $('answer-label').textContent=answerText?(displayedRetryAttempt?'محاولة سريعة بعد الرفض':'الإجابة المقترحة'):'تعذّر إكمال الحل';
     $('answer-text').textContent=answerText||'لم تُحدَّد إجابة من البيانات المقروءة';
     $('explanation').textContent = event.answer.explanation || '';

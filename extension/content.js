@@ -1,7 +1,7 @@
 (() => {
   'use strict';
-  if (globalThis.__alefAssistantInstalled==='0.5.6') return;
-  globalThis.__alefAssistantInstalled = '0.5.6';
+  if (globalThis.__alefAssistantInstalled==='0.5.7') return;
+  globalThis.__alefAssistantInstalled = '0.5.7';
 
   let selectors = {};
   let subjects = new Map();
@@ -476,11 +476,11 @@
     const navigation=discoverActions();
     const catalog=coreCatalog();
     const diagnostics=[];
-    let question=null,questionFound=false,questionState={};
+    let question=null,questionFound=false,questionState={},questionNode=null,questionReadFailed=false;
     const completed=!loginPage() && completionVisible();
     if(!completed && !loginPage()) {
-      try {questionFound=!!questionContainer();if(questionFound){questionState=readQuestion();question=questionState.question;}}
-      catch(error){questionFound=true;diagnostics.push(error.message);}
+      try {questionNode=questionContainer();questionFound=!!questionNode;if(questionFound){questionState=readQuestion();question=questionState.question;}}
+      catch(error){questionFound=true;questionReadFailed=true;diagnostics.push(error.message);}
     }
     let stage='unknown';
     if(loginPage())stage='unknown';
@@ -497,7 +497,13 @@
     const player=first('[data-testid="ncle-activity-page-player"],[data-testid="content-page-body-player"],[data-alef-instruction],.lesson-intro,.instruction')||
       (topCourseContext?document.body:null);
     const spinner=player&&first('.spinner,.loading-spinner,[data-testid="loading-spinner"],[role="progressbar"],[aria-busy="true"]',player);
-    const loading=!loginPage()&&(document.readyState==='loading'||!!spinner||frames.some(frame=>frame.required&&frame.loading===true));
+    // Slide progress bars and stale shell spinners may remain around a ready
+    // exercise. They must not hide a visible reader error behind a load timeout.
+    // An empty question wrapper is still allowed to finish mounting its tools.
+    const readyQuestion=!!question||questionState.needsPreparation===true||questionReadFailed&&!!questionNode&&!!first(
+      'input:not([type="hidden"]),textarea,select,[role="combobox"],[role="radio"],[role="checkbox"],[data-testid="choice-item"],.dnd-droppable,[data-alef-item],math-field',questionNode);
+    const loading=!loginPage()&&(frames.some(frame=>frame.required&&frame.loading===true)||
+      !readyQuestion&&(document.readyState==='loading'||!!spinner));
     for(const frame of frames){
       if(!frame.required||frame.accessible||frame.loading===true)continue;
       const host=frame.origin?new URL(frame.origin).host:null;
@@ -763,7 +769,7 @@
   const PROMPT_CONTEXT='[data-alef-question-context],[data-testid="question-statement-container"],.question-statement-container';
   const CONTEXT_CHROME='aside,nav,button,[role="button"],input,textarea,select,[role="banner"],[role="navigation"],[data-testid="ncle-main-contents"],[data-testid="ncle-sidebar"],[data-testid="progress-bar-slide-count"],[role="progressbar"]';
   const PROMPT_FEEDBACK='[data-testid="general-answer-feedback"],[data-testid="answerFeedback"],[data-testid="answer-feedback"],[data-testid="correct-answer-feedback"],[data-alef-feedback],[data-testid="wrong-answer-feedback"],[data-testid$="question-feedback-container"],[data-testid="custom-feedback-container"],[role="status"],[role="alert"]';
-  function promptBody(authored,{context=false,omitMediaUI=false}={}) {
+  function promptBody(authored,{context=false,omitMediaUI=false,dropdownFields=[]}={}) {
     if(authored.nodeType===3)return visible(authored.parentElement)?clean(authored.textContent):'';
     if(authored.matches(PROMPT_FEEDBACK)||context&&authored.matches(CONTEXT_CHROME))return '';
     const copy=authored.cloneNode(true);
@@ -777,7 +783,12 @@
       const style=styleOf(node);
       if(style.display==='none'||['hidden','collapse'].includes(style.visibility))copiedNodes[index].setAttribute('hidden','');
     });
-    copy.querySelectorAll('.dropdown-input-field-container,[data-testid="selectableChoice"],select,[role="combobox"]').forEach(node=>node.replaceWith(' [قائمة الإجابة] '));
+    copy.querySelectorAll('.dropdown-input-field-container,[data-testid="selectableChoice"],select,[role="combobox"]').forEach(node=>{
+      const original=originalNodes[copiedNodes.indexOf(node)];
+      const fields=dropdownFields.filter(field=>original===field.node||original?.contains(field.node));
+      if(dropdownFields.length>1&&fields.length>1){node.replaceWith(...node.childNodes);return;}
+      node.replaceWith(dropdownFields.length>1&&fields.length===1?` [dropdown:${fields[0].id}] `:' [قائمة الإجابة] ');
+    });
     copy.querySelectorAll('.dnd-droppable[id^="droppable-"][data-index]').forEach(node=>node.replaceWith(' [blank:'+node.getAttribute('data-index')+'] '));
     copy.querySelectorAll('.dnd-options-draggable,.dnd-options-draggable-overlay,.dnd-overlay').forEach(node=>node.remove());
     copy.querySelectorAll('[data-testid^="fill-blank-dd-"]').forEach(node=>node.replaceWith(' [blank:'+node.getAttribute('data-testid').slice(14)+'] '));
@@ -809,6 +820,7 @@
     // content in the single-question player, and explicitly associated content
     // even when CSS places it after the answer widget. Following unassociated
     // siblings are excluded: legacy renderers append untagged result feedback.
+    const dropdownFields=dropdownFieldEntries(container);
     const authored=container.matches('[data-testid="question-renderer"]')
       ? first('[data-testid^="question-renderer-"]',container)||container : container;
     const scope=authoredScope(container),preceding=[];
@@ -821,11 +833,11 @@
         preceding.unshift(...siblings);
       }
     }
-    const pieces=preceding.map(node=>promptBody(node,{context:true})).filter(Boolean);
-    const value=promptBody(authored);if(value)pieces.push(value);
+    const pieces=preceding.map(node=>promptBody(node,{context:true,dropdownFields})).filter(Boolean);
+    const value=promptBody(authored,{dropdownFields});if(value)pieces.push(value);
     const referenced=[...questionReferences(container),...all(PROMPT_CONTEXT,scope).filter(node=>!authored.contains(node)&&!node.contains(container))];
     for(const node of uniqueNodes(referenced)) {
-      const extra=promptBody(node,{context:true});
+      const extra=promptBody(node,{context:true,dropdownFields});
       if(extra&&!pieces.some(piece=>piece.includes(extra)))pieces.push(extra);
     }
     return clean(pieces.join(' '));
@@ -867,6 +879,27 @@
   // Read answered/locked controls too: Try Again must keep the same question
   // identity. Write paths separately require an enabled, editable control.
   function dropdownControls(container){return all('select,[role="combobox"]',container);}
+  function dropdownFieldEntries(container){
+    const controls=dropdownControls(container);
+    // React Select allocates a new numeric instance ID after a remount. The
+    // authored blank's order stays stable even though that runtime ID changes.
+    const authored=controls.map(node=>clean(node.getAttribute('data-alef-field-id')||node.getAttribute('data-field-id')||
+      node.getAttribute('name')||(!/^react-select-\d+-input$/.test(node.id)?node.id:'')));
+    return controls.map((node,index)=>{
+      const source=authored[index],id=source&&authored.filter(value=>value===source).length===1?`field-${hash(source)}`:`field-${index+1}`;
+      return {id,text:`القائمة ${index+1} [dropdown:${id}]`,node};
+    });
+  }
+  function nativeDropdownOptions(control){
+    return [...control.options].filter(option=>availableSelectOption(option)&&option.value!=='')
+      .map(option=>({id:option.value,text:clean(option.textContent)}));
+  }
+  function validateDropdownOptions(options,multiple=false){
+    if(!options.length||options.some(option=>!option.text)||new Set(options.map(option=>option.id)).size!==options.length||
+      multiple&&(options.length>20||new Set(options.map(option=>option.text)).size!==options.length))
+      throw new Error('خيارات القائمة غير واضحة أو متكررة أو تتجاوز الحد المدعوم.');
+    return options;
+  }
   function textAnswerControls(container){
     return all('textarea,[data-alef-answer],input[type="text"],input[type="number"],input:not([type])',container)
       .filter(node=>node.matches('input,textarea')&&!node.matches('[role="combobox"]'));
@@ -894,13 +927,21 @@
     let options=controls.map(({id,text})=>({id,text})),type,extra={};
     if(matching){type='matching';options=[];extra={items:matching.items.map(({id,text})=>({id,text})),targets:matching.targets.map(({id,text})=>({id,text}))};}
     else if(drops.length){
-      if(drops.length!==1)throw new Error('السؤال يحتوي على أكثر من قائمة؛ يحتاج ربطًا مخصصًا للحفاظ على تطابق كل فراغ.');
-      type='single';
-      if(drops[0].tagName==='SELECT')options=[...drops[0].options].filter(option=>availableSelectOption(option)&&option.value!=='').map((option,index)=>({id:option.value||`select-${index}`,text:clean(option.textContent)}));
-      else {
-        const cacheKey=hash(location.href+prompt);
-        options=dropdownCache?.key===cacheKey?dropdownCache.options:[];
-        if(!options.length)return {ok:true,question:null,completed:false,needsPreparation:true,canNext:false};
+      if(drops.length>20)throw new Error('السؤال يحتوي على أكثر من 20 قائمة؛ لم تُحذف فراغات من السؤال.');
+      const cacheKey=dropdownKey(container,prompt,visuals);
+      if(drops.length>1){
+        type='dropdowns';options=[];
+        const fields=dropdownFieldEntries(container).map(({id,text,node})=>({id,text,options:node.tagName==='SELECT'?nativeDropdownOptions(node):dropdownCache?.key===cacheKey?dropdownCache.fields?.[id]||[]:[]}));
+        if(fields.some(field=>!field.options.length))return {ok:true,question:null,completed:false,needsPreparation:true,canNext:false};
+        fields.forEach(field=>validateDropdownOptions(field.options,true));
+        extra={fields};
+      }else{
+        type='single';
+        if(drops[0].tagName==='SELECT')options=nativeDropdownOptions(drops[0]);
+        else {
+          options=dropdownCache?.key===cacheKey?dropdownCache.options:[];
+          if(!options.length)return {ok:true,question:null,completed:false,needsPreparation:true,canNext:false};
+        }
       }
     }else if(options.length){
       const types=new Set(controls.map(({control})=>control.type||control.getAttribute('role')));
@@ -963,8 +1004,19 @@
     }
   }
   const DROPDOWN_OPTIONS='[role="option"],[class*="react-select__option"]';
-  function dropdownKey(){const container=questionContainer();return container?hash(location.href+promptText(container)):null;}
-  function currentDropdown(){const controls=dropdownControls(questionContainer());if(controls.length!==1||controls[0].tagName==='SELECT')throw new Error('تغير حقل القائمة في السؤال.');return controls[0];}
+  function dropdownKey(container=questionContainer(),prompt=null,visuals=null){
+    if(!container)return null;
+    const code=first('[data-testid^="question-renderer-"]',container)?.getAttribute('data-testid');
+    return hash(JSON.stringify([location.href,prompt??promptText(container),
+      container.getAttribute('data-alef-question')||container.getAttribute('data-question-id')||code||'',
+      text(first('[data-testid="progress-bar-slide-count"]')),instructionPosition(),visuals??visualMetadata(visualNodes(container))]));
+  }
+  function currentDropdown(fieldId=null){
+    const fields=dropdownFieldEntries(questionContainer());
+    const field=fieldId?fields.find(item=>item.id===fieldId):fields.length===1?fields[0]:null;
+    if(!field)throw new Error('تغير حقل القائمة في السؤال.');
+    return field.node;
+  }
   function dropdownMenuOptions(control,opening){
     // React Select portals belong to the combobox's document/shadow tree,
     // never to another iframe or an unrelated menu elsewhere on the page.
@@ -991,14 +1043,15 @@
     // A busy menu may expose an incomplete first batch of answers.
     return menus.some(menu=>menu.matches('[aria-busy="true"]'))?[]:options;
   }
-  async function openDropdown(key,question=null){
-    let control=currentDropdown();if(disabled(control))throw new Error('القائمة معطلة؛ انتظر زر حاول مرة أخرى.');
+  async function openDropdown(key,question=null,fieldId=null){
+    let control=currentDropdown(fieldId);if(control.tagName==='SELECT')throw new Error('تغير نوع القائمة في السؤال.');
+    if(disabled(control))throw new Error('القائمة معطلة؛ انتظر زر حاول مرة أخرى.');
     const root=control.getRootNode(),opening={menus:new Set([...root.querySelectorAll('[role="listbox"]')].filter(visible)),expanded:control.getAttribute('aria-expanded')==='true'};
     const check=()=>{assertNotCancelled();if(question)assertQuestion(question);if(dropdownKey()!==key)throw new Error('تغير السؤال عند فتح القائمة.');};
     check();control.focus();control.dispatchEvent(new (view(control).KeyboardEvent)('keydown',{key:'ArrowDown',code:'ArrowDown',bubbles:true}));
     const started=Date.now();let mouseOpened=false;
     for(;;){
-      check();control=currentDropdown();if(disabled(control))throw new Error('تعطلت القائمة أثناء فتحها.');
+      check();control=currentDropdown(fieldId);if(control.tagName==='SELECT'||disabled(control))throw new Error('تعطلت القائمة أو تغير نوعها أثناء فتحها.');
       const options=dropdownMenuOptions(control,opening);if(options.length)return {control,options,opening};
       if(Date.now()-started>=2000)throw new Error('لم تظهر خيارات القائمة بعد فتحها.');
       if(!mouseOpened&&Date.now()-started>=160&&control.getAttribute('aria-expanded')!=='true'){
@@ -1008,12 +1061,12 @@
       await delay(40);
     }
   }
-  async function closeDropdown(key,opening){
-    const control=currentDropdown();control.dispatchEvent(new (view(control).KeyboardEvent)('keydown',{key:'Escape',code:'Escape',bubbles:true}));
+  async function closeDropdown(key,opening,fieldId=null){
+    const control=currentDropdown(fieldId);control.dispatchEvent(new (view(control).KeyboardEvent)('keydown',{key:'Escape',code:'Escape',bubbles:true}));
     const deadline=Date.now()+2000;
     for(;;){
       assertNotCancelled();if(dropdownKey()!==key)throw new Error('تغير السؤال عند إغلاق القائمة.');
-      const current=currentDropdown();
+      const current=currentDropdown(fieldId);
       if(current.getAttribute('aria-expanded')!=='true'&&!dropdownMenuOptions(current,opening).length)return;
       if(Date.now()>=deadline)throw new Error('لم تُغلق قائمة الإجابة بعد فحصها.');
       await delay(40);
@@ -1040,12 +1093,20 @@
     let container=questionContainer();if(!container)throw new Error('لم يظهر السؤال.');
     const collapsed=first('[data-testid="question-passage-collapsed-caret"],[data-alef-passage-toggle][aria-expanded="false"]',container);
     if(collapsed){const toggle=first('[data-testid="question-passage-chevron"]',container)||collapsed.closest('button,[role="button"]')||collapsed;click(toggle);await delay(100);assertNotCancelled();container=questionContainer();if(!container)throw new Error('تغير السؤال عند فتح القطعة.');}
-    const drops=dropdownControls(container);if(drops.length!==1||drops[0].tagName==='SELECT')return readQuestion();
-    const key=dropdownKey(),opened=await openDropdown(key);
-    const data=opened.options.map(node=>({id:`dropdown-${hash(text(node))}`,text:text(node)}));
-    if(!data.length||data.some(item=>!item.text)||new Set(data.map(item=>item.id)).size!==data.length)throw new Error('لم تظهر خيارات القائمة أو كانت متشابهة.');
-    dropdownCache={key,options:data};
-    await closeDropdown(key,opened.opening);
+    const fields=dropdownFieldEntries(container);if(!fields.length||fields.length===1&&fields[0].node.tagName==='SELECT')return readQuestion();
+    if(fields.length>20)throw new Error('السؤال يحتوي على أكثر من 20 قائمة؛ لم تُحذف فراغات من السؤال.');
+    const key=dropdownKey(),prepared={};
+    for(const field of fields){
+      assertNotCancelled();if(dropdownKey()!==key)throw new Error('تغير السؤال أثناء فحص القوائم.');
+      if(field.node.tagName==='SELECT'){validateDropdownOptions(nativeDropdownOptions(currentDropdown(field.id)),fields.length>1);continue;}
+      const opened=await openDropdown(key,null,field.id);
+      const data=validateDropdownOptions(opened.options.map(node=>({id:`dropdown-${hash(text(node))}`,text:text(node)})),fields.length>1);
+      prepared[field.id]=data;
+      await closeDropdown(key,opened.opening,field.id);
+    }
+    // Commit only after every list was inspected and closed. Partial menus
+    // cannot turn into a model request missing a later blank.
+    dropdownCache={key,fields:prepared,...(fields.length===1?{options:prepared[fields[0].id]}:{})};
     return readQuestion();
   }
   function blankHasWord(blank,expected){
@@ -1137,17 +1198,53 @@
     await waitAcknowledged(question,allMatchesPlaced,wordAcknowledged?'لم يؤكد الموقع تثبيت جميع الكلمات في فراغاتها الصحيحة.':'لم يؤكد الموقع تثبيت جميع أزواج المطابقة.');
     return submitAnswer(question,message,allMatchesPlaced);
   }
-  async function applyCustomDropdown(question,answer,message){
-    const desired=question.options.find(option=>option.id===answer.optionIds[0]);
-    const opened=await openDropdown(dropdownKey(),question);
+  async function chooseCustomDropdown(question,options,optionId,fieldId=null){
+    const desired=options.find(option=>option.id===optionId);
+    const opened=await openDropdown(dropdownKey(),question,fieldId);
     const actual=opened.options.map(node=>({id:`dropdown-${hash(text(node))}`,text:text(node)}));
-    if(actual.length!==question.options.length||actual.some(row=>!question.options.some(option=>option.id===row.id&&option.text===row.text)))throw new Error('تغيرت خيارات القائمة؛ لم تُطبّق الإجابة.');
+    if(actual.length!==options.length||actual.some(row=>!options.some(option=>option.id===row.id&&option.text===row.text)))throw new Error('تغيرت خيارات القائمة؛ لم تُطبّق الإجابة.');
     const matches=opened.options.filter(node=>text(node)===desired.text);
     if(matches.length!==1)throw new Error('لم تتطابق خيارات القائمة مع السؤال الحالي.');
     assertNotCancelled();assertQuestion(question);click(matches[0]);
-    const acknowledged=()=>{const control=currentDropdown();return !disabled(control)&&dropdownSelected(control,desired.text);};
+    const acknowledged=()=>{
+      const control=currentDropdown(fieldId);
+      // A React remount can replace the combobox with aria-expanded=false
+      // before its old portal finishes closing. Do not open the next blank
+      // while that previously owned menu is still visible.
+      return control.tagName!=='SELECT'&&!disabled(control)&&!opened.options.some(visible)&&dropdownSelected(control,desired.text);
+    };
     await waitAcknowledged(question,acknowledged,'لم يؤكد الموقع اختيار القائمة.');
+    return acknowledged;
+  }
+  async function applyCustomDropdown(question,answer,message){
+    const acknowledged=await chooseCustomDropdown(question,question.options,answer.optionIds[0]);
     return submitAnswer(question,message,acknowledged);
+  }
+  async function applyDropdownFields(question,answer,message){
+    const fields=question.fields,selections=answer.selections;
+    if(answer.optionIds.length||answer.text&&String(answer.text).trim()||!Array.isArray(selections)||selections.length!==fields.length||
+      new Set(selections.map(selection=>selection.fieldId)).size!==fields.length||selections.some(selection=>{
+        const field=fields.find(item=>item.id===selection.fieldId);
+        return !field||!field.options.some(option=>option.id===selection.optionId);
+      }))throw new Error('لم تتطابق إجابات القوائم مع جميع فراغات السؤال؛ لم تُطبّق إجابة جزئية.');
+    const acknowledgements=[];
+    for(const field of fields){
+      assertNotCancelled();assertQuestion(question);
+      const selection=selections.find(item=>item.fieldId===field.id),control=currentDropdown(field.id);
+      if(disabled(control))throw new Error('إحدى قوائم الإجابة معطلة؛ انتظر زر حاول مرة أخرى.');
+      let acknowledged;
+      if(control.tagName==='SELECT'){
+        const desired=[...control.options].find(option=>option.value===selection.optionId);
+        if(!desired||!availableSelectOption(desired))throw new Error('خيار القائمة غير متاح في الفراغ المحدد.');
+        setValue(control,selection.optionId);
+        acknowledged=()=>{const current=currentDropdown(field.id);return current.tagName==='SELECT'&&!disabled(current)&&current.value===selection.optionId;};
+        await waitStableField(question,acknowledged,()=>currentDropdown(field.id),'لم يثبت اختيار القائمة في الفراغ المحدد.');
+      }else acknowledged=await chooseCustomDropdown(question,field.options,selection.optionId,field.id);
+      acknowledgements.push(acknowledged);
+      await waitAcknowledged(question,()=>acknowledgements.every(check=>check()),'تغير اختيار سابق أثناء تطبيق قوائم السؤال؛ لم تُرسل إجابة جزئية.');
+    }
+    const allFieldsSelected=()=>acknowledgements.every(check=>check());
+    return submitAnswer(question,message,allFieldsSelected);
   }
   async function apply(message){
     assertNotCancelled();
@@ -1156,6 +1253,7 @@
     const container=questionContainer();
     let acknowledged=null;
     if(question.type==='matching')return applyMatching(question,answer,message);
+    if(question.type==='dropdowns')return applyDropdownFields(question,answer,message);
     if(question.type==='text'){
       if(typeof answer.text!=='string'||!answer.text.trim()||answer.optionIds.length)throw new Error('الإجابة النصية غير صالحة.');
       const inputs=textAnswerControls(container);
@@ -1209,7 +1307,7 @@
       appRoots:[...document.querySelectorAll('#root,#app,app-root,[data-reactroot],main')].slice(0,8).map(node=>({
         tag:node.tagName,kind:node.matches('#root')?'root':node.matches('#app')?'app':node.matches('main')?'main':'app-root',
         children:node.childElementCount,visible:visible(node)}))};
-    return {ok:true,diagnostics:{version:'0.5.6',page:{url:cleanUrl(location.href)},stage:snapshot.stage,rendering,
+    return {ok:true,diagnostics:{version:'0.5.7',page:{url:cleanUrl(location.href)},stage:snapshot.stage,rendering,
       subjects:snapshot.subjects,lessons:snapshot.lessons.map(({href,...lesson})=>({...lesson,href:href?cleanUrl(href):undefined})),
       navigation:snapshot.navigation,issues:snapshot.diagnostics,frames:snapshot.frames,loading:snapshot.loading,
       ...(snapshot.questionEvidence?{questionEvidence:snapshot.questionEvidence}:{}),

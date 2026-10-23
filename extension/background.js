@@ -383,8 +383,19 @@ const sameQuestion = (snapshot,question) => snapshot?.question?.id === question.
 const retryAction = snapshot => snapshot?.navigation?.find(action=>action.kind==='retry');
 const retryRequired = snapshot => !!retryAction(snapshot)||snapshot?.feedback==='wrong'&&
   !snapshot.navigation?.some(action=>['next','finish'].includes(action.kind));
-const retryAnswerKey = answer => answer.optionIds?.length?JSON.stringify([...answer.optionIds].sort()):answer.matches?
+const retryAnswerKey = answer => answer.optionIds?.length?JSON.stringify([...answer.optionIds].sort()):answer.selections?.length?
+  JSON.stringify(answer.selections.map(({fieldId,optionId})=>({fieldId,optionId})).sort((a,b)=>a.fieldId.localeCompare(b.fieldId))):answer.matches?
   JSON.stringify([...answer.matches].sort((a,b)=>a.itemId.localeCompare(b.itemId))):(answer.text||'').normalize('NFKC').trim();
+function dropdownSelections(question,answer) {
+  const fields=question.fields,selections=answer?.selections;
+  if(!Array.isArray(fields)||fields.length<2||fields.length>20||new Set(fields.map(field=>field?.id)).size!==fields.length||
+    fields.some(field=>typeof field?.id!=='string'||!field.id||!Array.isArray(field.options)||!field.options.length)||
+    !Array.isArray(selections)||selections.length!==fields.length||
+    new Set(selections.map(row=>row?.fieldId)).size!==selections.length)return null;
+  const byField=new Map(selections.map(row=>[row?.fieldId,row]));
+  const ordered=fields.map(field=>byField.get(field.id));
+  return ordered.every((row,index)=>row&&fields[index].options.some(option=>option.id===row.optionId))?ordered:null;
+}
 function fastRetryAnswer(question,previous,tried,retryNumber) {
   const base={optionIds:[],text:'',explanation:'محاولة سريعة بعد رفض الإجابة الأولى؛ لا تمثل حلًا جديدًا أو استعادة درجة السؤال.'};
   if(['single','multiple'].includes(question.type)) {
@@ -396,6 +407,23 @@ function fastRetryAnswer(question,previous,tried,retryNumber) {
     const previousIndex=candidates.findIndex(answer=>retryAnswerKey(answer)===retryAnswerKey(previous));
     return candidates.find(answer=>!tried.has(retryAnswerKey(answer)))||candidates[
       previousIndex<0?(retryNumber-1)%candidates.length:(previousIndex+1)%candidates.length];
+  }
+  if(question.type==='dropdowns') {
+    const ordered=dropdownSelections(question,previous);if(!ordered)return null;
+    const indices=question.fields.map((field,index)=>field.options.findIndex(option=>option.id===ordered[index].optionId));
+    let first;
+    // Traverse complete combinations, not a global pool of option IDs. Two
+    // fields may legitimately choose the same value, each from its own menu.
+    for(let candidateIndex=0;candidateIndex<=tried.size;candidateIndex++) {
+      for(let index=indices.length-1;index>=0;index--) {
+        indices[index]=(indices[index]+1)%question.fields[index].options.length;
+        if(indices[index])break;
+      }
+      const candidate={...base,selections:question.fields.map((field,index)=>({fieldId:field.id,optionId:field.options[indices[index]].id}))};
+      first ||= candidate;
+      if(!tried.has(retryAnswerKey(candidate)))return candidate;
+    }
+    return first;
   }
   if(question.type==='text')return typeof previous.text==='string'&&previous.text.trim()?{...base,text:previous.text}:null;
   if(question.type==='matching') {
@@ -526,6 +554,7 @@ async function solve(question,subject,config,signal) {
       method:'POST',headers:{'Content-Type':'application/json','Authorization':`Bearer ${config.token}`},
       body:JSON.stringify({subject,question:{id:question.id,text:question.text,type:question.type,options:question.options,
         ...(question.requiresVision?{requiresVision:true,images:question.images||[]}:{}),
+        ...(question.type==='dropdowns'?{fields:question.fields}:{}),
         ...(question.type==='matching'?{items:question.items,targets:question.targets}:{})},verify:config.verify,qualityMode:config.qualityMode}),
       signal:AbortSignal.any([signal,timeout]),
     });
@@ -586,6 +615,13 @@ async function checkAccuracyBackend(config,signal,requiresVision) {
   }
   if(requiresVision&&config.backendHealth.visionReady!==true) {
     throw new Error(config.backendHealth.visionMessage||'النموذج البصري غير جاهز. شغّل START-WINDOWS.cmd من النسخة الجديدة لتجهيزه؛ لم يُرسل السؤال إلى نموذج نصّي.');
+  }
+}
+async function checkDropdownBackend(config,signal,requiresVision) {
+  await checkAccuracyBackend(config,signal,requiresVision);
+  assertActive(signal);
+  if(config.backendHealth.capabilities?.multiDropdown!==true) {
+    throw new Error('الخادم الحالي لا يدعم السؤال الذي يحتوي على عدة قوائم. أغلق نافذة START القديمة، وحدّث المشروع كاملًا بما فيه مجلد server، ثم شغّل START-WINDOWS.cmd من النسخة الجديدة. لم تُرسل إجابة ناقصة.');
   }
 }
 async function captureQuestionImages(tabId,question,config,origin,signal,context) {
@@ -742,7 +778,8 @@ async function runLesson(tabId,subject,initial,lesson,config,origin,signal,state
         config.qualityMode?'جارٍ حل السؤال بوضع الدقة الأعلى…':config.verify?'جارٍ حل السؤال ثم التحقق بحل ثانٍ…':'جارٍ حل السؤال بالوضع السريع…',{question});
       let result;
       let requestQuestion=question;
-      if(config.qualityMode||question.requiresVision)await checkAccuracyBackend(config,signal,question.requiresVision);
+      if(question.type==='dropdowns')await checkDropdownBackend(config,signal,question.requiresVision);
+      else if(config.qualityMode||question.requiresVision)await checkAccuracyBackend(config,signal,question.requiresVision);
       if(question.requiresVision)requestQuestion=await captureQuestionImages(tabId,requestQuestion,config,origin,signal,context);
       const solveStarted=Date.now();
       try { result = await solve(requestQuestion,subject.name,config,signal); }
@@ -753,6 +790,8 @@ async function runLesson(tabId,subject,initial,lesson,config,origin,signal,state
         return {review:true,snapshot,question,answer,cause:result.reason||'answer_requires_review',message:reviewMessages[result.reason] ||
           'الإجابة تحتاج مراجعة: الثقة منخفضة أو لم تتفق عمليتا الحل والتحقق.'};
       }
+      if(question.type==='dropdowns'&&!dropdownSelections(question,answer))return {review:true,snapshot,question,answer,
+        cause:'invalid_selection',message:'إجابات القوائم لا تطابق فراغات السؤال؛ لم تُطبّق إجابة على قائمة أخرى.'};
       const solveDurationMs=Date.now()-solveStarted;
       await emit(tabId,'answer',`وصلت الإجابة خلال ${(solveDurationMs/1000).toFixed(1)} ثانية؛ جارٍ مطابقتها مع السؤال الظاهر.`,{question,answer,solveDurationMs});
       assertActive(signal);
@@ -985,9 +1024,11 @@ async function handle(message) {
           question:{id:question.id,type:question.type,text:question.text,
             options:(question.options||[]).map(({id,text})=>({id,text})),requiresVision:question.requiresVision===true,
             ...(question.items?{items:question.items.map(({id,text})=>({id,text}))}:{}),
+            ...(question.fields?{fields:question.fields.map(({id,text,options})=>({id,text,options:options.map(({id,text})=>({id,text}))}))}:{}),
             ...(question.targets?{targets:question.targets.map(({id,text})=>({id,text}))}:{})}}:null,
         lastReview:reviewEvent?{message:reviewEvent.message,cause:reviewEvent.cause||null,lesson:lessonInfo(reviewEvent.currentLesson),
           ...(reviewEvent.answer?{answer:{optionIds:reviewEvent.answer.optionIds||[],text:reviewEvent.answer.text||'',
+            ...(reviewEvent.answer.selections?{selections:reviewEvent.answer.selections.map(({fieldId,optionId})=>({fieldId,optionId}))}:{}),
             explanation:reviewEvent.answer.explanation||'',confidence:reviewEvent.answer.confidence}}:{})}:null};
       return {...result,diagnostics:{...result.diagnostics,embedded,runResult}};
     }

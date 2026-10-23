@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "مُعين | مساعد ألف",
   "description": "اختر المادة، تابع الحل، وراجع الإجابات غير المؤكدة. يعمل مع جلسة ألف المفتوحة وخادم ذكاء اصطناعي محلي.",
-  "version": "0.5.6",
+  "version": "0.5.7",
   "minimum_chrome_version": "120",
   "permissions": [
     "activeTab",

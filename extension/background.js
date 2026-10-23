@@ -263,8 +263,9 @@ function checkedConfig(input) {
   const confidence = Number(input.minConfidence ?? 0.85);
   if (!Number.isFinite(confidence) || confidence < 0.85 || confidence > 1) throw new Error('حد الثقة يجب أن يكون بين 0.85 و1.');
   if (input.qualityMode !== undefined && typeof input.qualityMode !== 'boolean') throw new Error('إعداد وضع الدقة غير صالح.');
+  if (input.allowUncertain !== undefined && typeof input.allowUncertain !== 'boolean') throw new Error('إعداد المتابعة عند انخفاض الثقة غير صالح.');
   const qualityMode=input.qualityMode===true;
-  return {serverUrl:url.origin,token:input.token.trim(),selectors,qualityMode,verify:qualityMode||input.verify !== false,
+  return {serverUrl:url.origin,token:input.token.trim(),selectors,qualityMode,verify:qualityMode||input.verify !== false,allowUncertain:input.allowUncertain===true,
     autoSubmit:input.autoSubmit !== false,skipInstruction:input.skipInstruction !== false,minConfidence:confidence};
 }
 async function connect(tabId,selectors) {
@@ -478,6 +479,21 @@ function dropdownSelections(question,answer) {
   const ordered=fields.map(field=>byField.get(field.id));
   return ordered.every((row,index)=>row&&fields[index].options.some(option=>option.id===row.optionId))?ordered:null;
 }
+function usableUncertainAnswer(question,answer){
+  if(!answer||!Number.isFinite(answer.confidence)||answer.confidence<0||answer.confidence>1||
+    !Array.isArray(answer.optionIds)||new Set(answer.optionIds).size!==answer.optionIds.length||
+    typeof answer.text!=='string'||answer.text.length>8000)return false;
+  if(['single','multiple'].includes(question.type))return answer.optionIds.length>0&&
+    (question.type!=='single'||answer.optionIds.length===1)&&answer.optionIds.every(id=>question.options?.some(option=>option.id===id));
+  if(answer.optionIds.length)return false;
+  if(question.type==='text')return !!answer.text.trim();
+  if(question.type==='dropdowns')return !!dropdownSelections(question,answer);
+  if(question.type==='matching')return Array.isArray(answer.matches)&&answer.matches.length===question.items?.length&&
+    answer.matches.length>0&&new Set(answer.matches.map(pair=>pair?.itemId)).size===answer.matches.length&&
+    new Set(answer.matches.map(pair=>pair?.targetId)).size===answer.matches.length&&answer.matches.every(pair=>
+      question.items.some(item=>item.id===pair?.itemId)&&question.targets?.some(target=>target.id===pair?.targetId));
+  return false;
+}
 function fastRetryAnswer(question,previous,tried,retryNumber) {
   const base={optionIds:[],text:'',explanation:'محاولة سريعة بعد رفض الإجابة الأولى؛ لا تمثل حلًا جديدًا أو استعادة درجة السؤال.'};
   if(['single','multiple'].includes(question.type)) {
@@ -638,7 +654,8 @@ async function solve(question,subject,config,signal) {
         ...(question.answerFormat?{answerFormat:question.answerFormat}:{}),
         ...(question.requiresVision?{requiresVision:true,images:question.images||[]}:{}),
         ...(question.type==='dropdowns'?{fields:question.fields}:{}),
-        ...(question.type==='matching'?{items:question.items,targets:question.targets}:{})},verify:config.verify,qualityMode:config.qualityMode}),
+        ...(question.type==='matching'?{items:question.items,targets:question.targets}:{})},verify:config.verify,qualityMode:config.qualityMode,
+        ...(config.allowUncertain?{allowUncertain:true}:{})}),
       signal:AbortSignal.any([signal,timeout]),
     });
   } catch (error) {
@@ -713,6 +730,11 @@ async function checkMathFieldBackend(config,signal,requiresVision) {
   if(config.backendHealth.capabilities?.mathField!==true) {
     throw new Error('الخادم الحالي لا يدعم إدخال المعادلات. أغلق نافذة START القديمة، وحدّث المشروع كاملًا بما فيه مجلد server، ثم شغّل START-WINDOWS.cmd من النسخة الجديدة.');
   }
+}
+async function checkUncertainBackend(config,signal,requiresVision){
+  await checkAccuracyBackend(config,signal,requiresVision);
+  assertActive(signal);
+  if(config.backendHealth.capabilities?.uncertainAnswers!==true)throw new Error('الخادم الحالي لا يدعم المتابعة عند انخفاض الثقة. حدّث المشروع كاملًا وأعد تشغيل START-WINDOWS.cmd من النسخة الجديدة.');
 }
 async function captureQuestionImages(tabId,question,config,origin,signal,context) {
   await validateQuestionContext(tabId,question,context,config,origin,signal);
@@ -871,32 +893,41 @@ async function runLesson(tabId,subject,initial,lesson,config,origin,signal,state
       if(question.answerFormat==='latex')await checkMathFieldBackend(config,signal,question.requiresVision);
       else if(question.type==='dropdowns')await checkDropdownBackend(config,signal,question.requiresVision);
       else if(config.qualityMode||question.requiresVision)await checkAccuracyBackend(config,signal,question.requiresVision);
+      if(config.allowUncertain)await checkUncertainBackend(config,signal,question.requiresVision);
       if(question.requiresVision)requestQuestion=await captureQuestionImages(tabId,requestQuestion,config,origin,signal,context);
       const solveStarted=Date.now();
       try { result = await solve(requestQuestion,subject.name,config,signal); }
       catch (error) { error.fatal = true;throw error; }
       assertActive(signal);
       const answer = result.answer;
-      if (result.needsReview || !answer || !Number.isFinite(answer.confidence) || answer.confidence < config.minConfidence || (config.verify && result.verified !== true)) {
+      const uncertaintyReason=['low_confidence','verification_disagreement'].includes(result.reason)?result.reason:
+        !result.needsReview&&Number.isFinite(answer?.confidence)&&answer.confidence<config.minConfidence?'low_confidence':null;
+      const uncertainAnswer=config.allowUncertain&&!!uncertaintyReason&&usableUncertainAnswer(question,answer);
+      const uncertainty=uncertainAnswer?{uncertainAnswer:true,uncertaintyReason,verified:result.verified===true}:{};
+      if(config.allowUncertain&&uncertaintyReason&&!uncertainAnswer)return {review:true,snapshot,question,answer,cause:'invalid_selection',
+        message:'لم يُرجع النموذج إجابة كاملة قابلة للإدخال؛ تعذّر إرسال جواب فارغ أو خيارات لا تنتمي إلى السؤال.'};
+      if (!uncertainAnswer&&(result.needsReview || !answer || !Number.isFinite(answer.confidence) || answer.confidence < config.minConfidence || (config.verify && result.verified !== true))) {
         return {review:true,snapshot,question,answer,cause:result.reason||'answer_requires_review',message:reviewMessages[result.reason] ||
           'الإجابة تحتاج مراجعة: الثقة منخفضة أو لم تتفق عمليتا الحل والتحقق.'};
       }
       if(question.type==='dropdowns'&&!dropdownSelections(question,answer))return {review:true,snapshot,question,answer,
         cause:'invalid_selection',message:'إجابات القوائم لا تطابق فراغات السؤال؛ لم تُطبّق إجابة على قائمة أخرى.'};
       const solveDurationMs=Date.now()-solveStarted;
-      await emit(tabId,'answer',`وصلت الإجابة خلال ${(solveDurationMs/1000).toFixed(1)} ثانية؛ جارٍ مطابقتها مع السؤال الظاهر.`,{question,answer,solveDurationMs});
+      await emit(tabId,'answer',uncertainAnswer?'تطبيق أفضل إجابة متاحة رغم عدم التأكد، حسب إعداد المتابعة…':
+        `وصلت الإجابة خلال ${(solveDurationMs/1000).toFixed(1)} ثانية؛ جارٍ مطابقتها مع السؤال الظاهر.`,{question,answer,solveDurationMs,...uncertainty});
       assertActive(signal);
       await validateQuestionContext(tabId,question,context,config,origin,signal);
       const applied = await pageMessage(tabId,{type:'ALEF_APPLY',questionId:question.id,
         questionFingerprint:question.fingerprint,answer,selectors:config.selectors,autoSubmit:config.autoSubmit},origin,signal,context.frameId,context.documentId);
       if (!applied.submitted) {
-        return {review:true,blocking:true,snapshot,question,answer,applied:applied.applied===true,message:applied.reason ||
+        return {review:true,blocking:true,snapshot,question,answer,...uncertainty,applied:applied.applied===true,message:applied.reason ||
           'تم اختيار الإجابة. راجعها وأرسلها يدويًا؛ الإرسال التلقائي متوقف.'};
       }
       state.stats.solved++;
       retryState=null;
       lastSubmitted={question,answer,context};
-      await emit(tabId,'submitted','أُرسلت الإجابة. انتظار السؤال التالي…',{question,answer,applied:true,submitted:true});
+      await emit(tabId,'submitted',uncertainAnswer?'أُرسلت إجابة غير مؤكدة حسب إعداد المتابعة. انتظار السؤال التالي…':
+        'أُرسلت الإجابة. انتظار السؤال التالي…',{question,answer,applied:true,submitted:true,...uncertainty});
       await pause(300,signal);
       snapshot = await afterSubmission(tabId,question,config,origin,signal);
       continue;
@@ -1043,6 +1074,7 @@ async function run(tabId,subjectId,config,controller,resumeLessonId=null) {
         // issue or uncertain answer cannot cause a rapid tour of the course.
         await emit(tabId,'review',outcome.message,{blocking:true,...(outcome.cause?{cause:outcome.cause}:{}),
           question:outcome.question||snapshot?.question,answer:outcome.answer,
+          ...(outcome.uncertainAnswer?{uncertainAnswer:true,uncertaintyReason:outcome.uncertaintyReason,verified:outcome.verified===true}:{}),
           ...(outcome.applied!==undefined?{applied:outcome.applied,submitted:false}:{})});return;
       }
       if (!catalogMode) {

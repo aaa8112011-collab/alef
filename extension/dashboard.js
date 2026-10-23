@@ -13,7 +13,7 @@ let blockedFrames = [];
 let runEventRevision = 0;
 let lastRunSequence = 0;
 let connected = false;
-let config = {serverUrl:DEFAULT_URL,token:'',verify:true,qualityMode:true,autoSubmit:true,skipInstruction:true,selectors:{}};
+let config = {serverUrl:DEFAULT_URL,token:'',verify:true,qualityMode:true,allowUncertain:true,autoSubmit:true,skipInstruction:true,selectors:{}};
 let startedAt = null;
 let eventCount = 0;
 let lessonQueue = [];
@@ -21,6 +21,7 @@ let lessonStats = {};
 let answerLessonKey = null;
 let displayedQuestion = null;
 let displayedRetryAttempt = false;
+let displayedUncertainAnswer = false;
 let pairingSaveRevision = 0;
 let pendingPairingSave = Promise.resolve();
 const lessonStatuses = {pending:'بانتظار البدء',running:'جارٍ العمل',completed:'مكتمل',review:'يحتاج مراجعة',locked:'مقفل',alreadycompleted:'مكتمل سابقًا'};
@@ -40,11 +41,24 @@ function setBadge(text, kind = 'neutral') {
 }
 function updateSolveMode() {
   $('solve-mode').textContent = $('verify').checked
-    ? 'الدقة الأعلى مفعّلة: تفكير متأنٍّ وحلّان مستقلان للمراجعة؛ يحتاج وقتًا إضافيًا، ولا يضمن صحة كل إجابة.'
+    ? $('allow-uncertain').checked
+      ? 'الدقة الأعلى مفعّلة: تفكير متأنٍّ ومراجعة مستقلة عند توفرها؛ قد تُرسل أفضل إجابة متاحة قبل اكتمال التحقق عند انخفاض الثقة. يحتاج وقتًا إضافيًا، ولا يضمن صحة كل إجابة.'
+      : 'الدقة الأعلى مفعّلة: تفكير متأنٍّ وحلّان مستقلان للمراجعة؛ يحتاج وقتًا إضافيًا، ولا يضمن صحة كل إجابة.'
     : 'الوضع السريع مفعّل: حل واحد دون المراجعة المستقلة؛ قد يزيد احتمال الخطأ.';
+}
+function updateUncertaintyMode() {
+  const allowed=$('allow-uncertain').checked;
+  $('uncertainty-mode').textContent=allowed
+    ? 'تُرسل أفضل إجابة متاحة حتى عند انخفاض الثقة أو اختلاف المراجعة؛ قد تكون خاطئة. يتوقف عند تعذّر قراءة السؤال أو تطبيق الإجابة.'
+    : 'يتوقف عند انخفاض الثقة أو اختلاف المراجعة لتراجع الإجابة قبل إرسالها.';
+  $('run-policy').textContent=allowed
+    ? 'راقب الإجابات وشرحها، وتوقّف في أي وقت. المتابعة مفعّلة للإجابات غير المؤكدة؛ قد تكون خاطئة.'
+    : 'راقب الإجابات وشرحها، وتوقّف في أي وقت. الأسئلة غير المؤكدة تنتظر مراجعتك.';
+  $('review-policy').textContent=allowed?'تعذّر التنفيذ':'بلا تخمين';
 }
 function readRunOptions() {
   config.verify=$('verify').checked;config.qualityMode=config.verify;
+  config.allowUncertain=$('allow-uncertain').checked;
   config.autoSubmit=$('auto-submit').checked;config.skipInstruction=$('skip-instruction').checked;
 }
 function updateButtons() {
@@ -55,6 +69,7 @@ function updateButtons() {
   $('connect').disabled = running||starting||grantingFrames;
   $('refresh').disabled = !connected || running||starting||grantingFrames;
   $('verify').disabled = running||starting||grantingFrames;
+  $('allow-uncertain').disabled = running||starting||grantingFrames;
   $('auto-submit').disabled = running||starting||grantingFrames;
   $('skip-instruction').disabled = running||starting||grantingFrames;
   $('diagnostics').disabled = !connected || running||starting||grantingFrames;
@@ -156,6 +171,7 @@ function renderLessonQueue(queue, stats, currentLesson) {
 function clearAnswer({resetLesson=false}={}) {
   displayedQuestion=null;
   displayedRetryAttempt=false;
+  displayedUncertainAnswer=false;
   if(resetLesson) {
     answerLessonKey=null;
     $('answer-subject').textContent='';$('answer-lesson').textContent='';
@@ -198,6 +214,7 @@ function showAnswer(event) {
   }
   if (event.answer) {
     displayedRetryAttempt=event.retryAttempt===true;
+    displayedUncertainAnswer=!displayedRetryAttempt&&event.uncertainAnswer===true;
     $('answer-empty').hidden=true;$('answer-content').hidden=false;
     $('answer-box').hidden = false;
     const question=event.question||displayedQuestion;
@@ -208,17 +225,18 @@ function showAnswer(event) {
       return `${dropdownLabel(field)} ← ${field?.options?.find(option=>option.id===selection.optionId)?.text||selection.optionId}`;
     })||[];
     const answerText=fields.length?fields.join('\n'):pairs.length?pairs.join('\n'):selected.length?selected.join('، '):(event.answer.text||'').trim();
-    $('answer-label').textContent=answerText?(displayedRetryAttempt?'محاولة سريعة بعد الرفض':'الإجابة المقترحة'):'تعذّر إكمال الحل';
+    $('answer-label').textContent=answerText?(displayedRetryAttempt?'محاولة سريعة بعد الرفض':displayedUncertainAnswer?'إجابة غير مؤكدة':'الإجابة المقترحة'):'تعذّر إكمال الحل';
     $('answer-text').textContent=answerText||'لم تُحدَّد إجابة من البيانات المقروءة';
     $('explanation').textContent = event.answer.explanation || '';
     const confidence = Number(event.answer.confidence);
     $('confidence').textContent = !displayedRetryAttempt&&Number.isFinite(confidence) ? `تقدير ثقة النموذج: ${Math.round(confidence*100)}٪` : '';
-    $('answer-state').textContent=displayedRetryAttempt?'جارٍ تطبيق محاولة سريعة بعد رفض الإجابة الأولى…':'وصلت الإجابة؛ جارٍ تطبيقها على السؤال في ألف…';$('answer-state').dataset.state='working';
+    $('answer-state').textContent=displayedRetryAttempt?'جارٍ تطبيق محاولة سريعة بعد رفض الإجابة الأولى…':displayedUncertainAnswer?'جارٍ تطبيق أفضل إجابة متاحة رغم عدم التأكد منها…':'وصلت الإجابة؛ جارٍ تطبيقها على السؤال في ألف…';$('answer-state').dataset.state='working';
   }
   if(event.kind==='submitted'&&event.submitted===true) {
     displayedRetryAttempt=event.retryAttempt===true||displayedRetryAttempt;
-    $('answer-label').textContent=displayedRetryAttempt?'محاولة سريعة مُرسلة':'الإجابة المُرسلة';
-    $('answer-state').textContent=displayedRetryAttempt?'أُرسلت محاولة سريعة بعد الرفض؛ لا تعني استعادة درجة المحاولة الأولى.':'أُرسلت الإجابة إلى ألف؛ جارٍ انتظار النتيجة أو السؤال التالي.';
+    displayedUncertainAnswer=!displayedRetryAttempt&&(event.uncertainAnswer===true||displayedUncertainAnswer);
+    $('answer-label').textContent=displayedRetryAttempt?'محاولة سريعة مُرسلة':displayedUncertainAnswer?'إجابة غير مؤكدة مُرسلة':'الإجابة المُرسلة';
+    $('answer-state').textContent=displayedRetryAttempt?'أُرسلت محاولة سريعة بعد الرفض؛ لا تعني استعادة درجة المحاولة الأولى.':displayedUncertainAnswer?'أُرسلت أفضل إجابة متاحة رغم عدم التأكد؛ جارٍ انتظار نتيجة ألف.':'أُرسلت الإجابة إلى ألف؛ جارٍ انتظار النتيجة أو السؤال التالي.';
     $('answer-state').dataset.state='submitted';
   } else if(['review','error'].includes(event.kind)&&event.blocking!==false) {
     $('answer-state').textContent=event.applied===true
@@ -487,13 +505,17 @@ async function init() {
   // The accuracy release upgrades old fast-only preferences once. A later
   // explicit qualityMode:false remains the user's choice on every reopening.
   const upgraded=typeof local.alefConfig?.qualityMode!=='boolean';
+  const uncertaintyUpgraded=typeof local.alefConfig?.allowUncertain!=='boolean';
   config.qualityMode=upgraded?true:local.alefConfig.qualityMode;
+  config.allowUncertain=uncertaintyUpgraded?true:local.alefConfig.allowUncertain;
   config.verify=config.qualityMode;
-  if(upgraded){const {token,...persistent}=config;await chrome.storage.local.set({alefConfig:persistent});}
+  if(upgraded||uncertaintyUpgraded){const {token,...persistent}=config;await chrome.storage.local.set({alefConfig:persistent});}
   if(!hasSavedToken&&Object.hasOwn(session,'alefPairingToken'))await persistPairingToken(config.token);
   await chrome.storage.session.remove?.('alefPairingToken');
   $('verify').checked=config.verify===true;$('auto-submit').checked=config.autoSubmit!==false;
+  $('allow-uncertain').checked=config.allowUncertain===true;
   updateSolveMode();
+  updateUncertaintyMode();
   $('skip-instruction').checked=config.skipInstruction!==false;
   const initialEvents=[];let loadingState=tabId!==null;
   chrome.runtime.onMessage.addListener(message=>{
@@ -510,6 +532,11 @@ async function init() {
   $('start').addEventListener('click',start);
   $('grant-frame-access').addEventListener('click',grantFrameAccess);
   $('verify').addEventListener('change',()=>{readRunOptions();updateSolveMode();});
+  $('allow-uncertain').addEventListener('change',async()=>{
+    readRunOptions();updateUncertaintyMode();updateSolveMode();
+    try{const {token,...persistent}=config;await chrome.storage.local.set({alefConfig:persistent});}
+    catch{notice('تعذّر حفظ خيار المتابعة عند انخفاض الثقة. أعد المحاولة.',true);}
+  });
   $('stop').addEventListener('click',async()=>{try{await message('STOP');}catch(error){notice(error.message,true);}});
   document.querySelectorAll('.settings-trigger').forEach(button=>button.addEventListener('click',openSettings));
   $('close-settings').addEventListener('click',()=>$('settings-dialog').close());

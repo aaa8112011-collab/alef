@@ -160,11 +160,11 @@ test('dashboard subject choice, start/stop, event rendering and permission reque
     assert.equal(await page.locator('#start').isEnabled(),true);
     await capture(page,'dashboard-fixture');
     assert.equal(await page.locator('#verify').isChecked(),true);
-    assert.ok((await page.locator('#solve-mode').textContent()).includes('حلّان مستقلان'));
+    assert.ok((await page.locator('#solve-mode').textContent()).includes('مراجعة مستقلة عند توفرها'));
     await page.locator('label').filter({has:page.locator('#verify')}).click();
     assert.ok((await page.locator('#solve-mode').textContent()).includes('الوضع السريع'));
     await page.locator('label').filter({has:page.locator('#verify')}).click();
-    assert.ok((await page.locator('#solve-mode').textContent()).includes('حلّان مستقلان'));
+    assert.ok((await page.locator('#solve-mode').textContent()).includes('مراجعة مستقلة عند توفرها'));
     await page.locator('#start').click();
     await page.waitForFunction(()=>__uiTest.messages.some(message=>message.type==='START'));
     assert.equal(await page.locator('#stop').isEnabled(),true);
@@ -358,6 +358,7 @@ test('observed Alef frame access is requested from an explicit click and resumes
     const resume=await page.evaluate(()=>__uiTest.messages.find(message=>message.type==='RESUME_FRAMES'));
     assert.equal(resume.subjectId,'arabic');
     assert.equal(resume.config.qualityMode,true);assert.equal(resume.config.verify,true);assert.equal(resume.config.minConfidence,.85);
+    assert.equal(resume.config.allowUncertain,true);
     assert.equal(await page.evaluate(()=>__uiTest.messages.some(message=>message.type==='START')),false);
     assert.match(await page.locator('#current-lesson').textContent(),/الاستعارة/);
     assert.equal(await page.locator('#lesson-queue li').count(),2);
@@ -763,7 +764,7 @@ for(const verify of [true,false]) {
     try{
       const {page}=harness;
       assert.equal(await page.locator('#verify').isChecked(),verify);
-      assert.ok((await page.locator('#solve-mode').textContent()).includes(verify?'حلّان مستقلان':'الوضع السريع'));
+      assert.ok((await page.locator('#solve-mode').textContent()).includes(verify?'مراجعة مستقلة عند توفرها':'الوضع السريع'));
       await page.locator('#subjects button').first().click();
       await page.locator('#start').click();
       await page.waitForFunction(()=>__uiTest.messages.some(message=>message.type==='START'));
@@ -912,4 +913,84 @@ test('a pairing-token write failure is reported instead of claiming the token wa
     assert.equal((await page.locator('body').innerText()).includes('replacement-ui-token-not-a-real-secret'),false);
     assert.deepEqual(harness.errors,[]);
   }finally{await harness.close();}
+});
+
+test('the requested uncertain-answer upgrade is enabled once and sent to START without changing other saved choices',async()=>{
+  const h=await dashboardHarness({connected:true,savedConfig:{qualityMode:false,verify:false,autoSubmit:false,skipInstruction:false},
+    savedToken:'uncertainty-upgrade-ui-token-not-a-real-secret'});
+  try{
+    const {page}=h;
+    assert.equal(await page.locator('#allow-uncertain').isChecked(),true);
+    assert.equal(h.stores.local.alefConfig.allowUncertain,true);
+    assert.equal(h.stores.local.alefConfig.qualityMode,false);
+    assert.equal(h.stores.local.alefConfig.autoSubmit,false);
+    assert.equal(h.stores.local.alefConfig.skipInstruction,false);
+    assert.equal(h.stores.local.alefPairingToken,'uncertainty-upgrade-ui-token-not-a-real-secret');
+    assert.equal(Object.hasOwn(h.stores.local.alefConfig,'token'),false);
+    assert.match(await page.locator('#run-policy').textContent(),/المتابعة مفعّلة/);
+    assert.doesNotMatch(await page.locator('#run-policy').textContent(),/تنتظر مراجعتك/);
+    assert.match(await page.locator('#uncertainty-mode').textContent(),/قد تكون خاطئة/);
+    await page.locator('#subjects button').first().click();await page.locator('#start').click();
+    await page.waitForFunction(()=>__uiTest.messages.some(message=>message.type==='START'));
+    const start=await page.evaluate(()=>__uiTest.messages.find(message=>message.type==='START'));
+    assert.equal(start.config.allowUncertain,true);assert.equal(start.config.qualityMode,false);
+    assert.equal(start.config.autoSubmit,false);assert.equal(start.config.skipInstruction,false);
+    assert.equal(await page.locator('#allow-uncertain').isDisabled(),true);
+    await page.locator('#stop').click();
+    assert.equal(await page.locator('#allow-uncertain').isEnabled(),true);
+    assert.deepEqual(h.errors,[]);
+  }finally{await h.close();}
+});
+
+test('an explicit uncertainty opt-out persists immediately before starting and survives reopening',async()=>{
+  const h=await dashboardHarness({connected:true,savedConfig:{qualityMode:true,allowUncertain:false}});
+  try{
+    let page=h.page;
+    assert.equal(await page.locator('#allow-uncertain').isChecked(),false);
+    assert.match(await page.locator('#run-policy').textContent(),/تنتظر مراجعتك/);
+    assert.match(await page.locator('#uncertainty-mode').textContent(),/يتوقف عند انخفاض الثقة/);
+    assert.match(await page.locator('#solve-mode').textContent(),/حلّان مستقلان/);
+    await page.locator('label').filter({has:page.locator('#allow-uncertain')}).click();
+    await page.waitForFunction(()=>__uiTest.local.alefConfig?.allowUncertain===true);
+    page=await h.reopen({clearSession:true});
+    assert.equal(await page.locator('#allow-uncertain').isChecked(),true);
+    await page.locator('label').filter({has:page.locator('#allow-uncertain')}).click();
+    await page.waitForFunction(()=>__uiTest.local.alefConfig?.allowUncertain===false);
+    page=await h.reopen({clearSession:true});
+    assert.equal(await page.locator('#allow-uncertain').isChecked(),false);
+    await page.locator('#subjects button').first().click();await page.locator('#start').click();
+    await page.waitForFunction(()=>__uiTest.messages.some(message=>message.type==='START'));
+    assert.equal(await page.evaluate(()=>__uiTest.messages.find(message=>message.type==='START').config.allowUncertain),false);
+    assert.deepEqual(h.errors,[]);
+  }finally{await h.close();}
+});
+
+test('an uncertain first answer keeps its actual confidence and stays distinct from fast retry or verified submission',async()=>{
+  const h=await dashboardHarness({connected:true});
+  try{
+    const {page}=h;
+    await page.evaluate(()=>{
+      const question={id:'uncertain',fingerprint:'uncertain',text:'اكتب النسبة المطلوبة.',type:'text',options:[]};
+      __uiTest.emit({kind:'question',question,message:'السؤال الحالي'});
+      __uiTest.emit({kind:'answer',question,uncertainAnswer:true,uncertaintyReason:'low_confidence',
+        answer:{optionIds:[],text:'3/2',confidence:.31,explanation:'أفضل جواب متاح بثقة منخفضة.'},message:'تطبيق أفضل إجابة متاحة'});
+    });
+    assert.equal(await page.locator('#answer-label').textContent(),'إجابة غير مؤكدة');
+    assert.equal(await page.locator('#confidence').textContent(),'تقدير ثقة النموذج: 31٪');
+    assert.doesNotMatch(await page.locator('#answer-label').textContent(),/سريعة|مُرسلة/);
+    assert.match(await page.locator('#answer-state').textContent(),/رغم عدم التأكد/);
+    await page.evaluate(()=>__uiTest.emit({kind:'submitted',submitted:true,uncertainAnswer:true,message:'أُرسلت أفضل إجابة متاحة'}));
+    assert.equal(await page.locator('#answer-label').textContent(),'إجابة غير مؤكدة مُرسلة');
+    assert.match(await page.locator('#answer-state').textContent(),/رغم عدم التأكد/);
+    assert.doesNotMatch(await page.locator('#answer-state').textContent(),/استعادة درجة|تم التحقق/);
+    assert.equal(await page.locator('#confidence').textContent(),'تقدير ثقة النموذج: 31٪');
+    await page.evaluate(()=>{
+      const question={id:'normal',fingerprint:'normal',text:'اكتب القيمة التالية.',type:'text',options:[]};
+      __uiTest.emit({kind:'question',question,message:'السؤال التالي'});
+      __uiTest.emit({kind:'answer',question,answer:{optionIds:[],text:'4',confidence:.95},message:'وصلت الإجابة'});
+    });
+    assert.equal(await page.locator('#answer-label').textContent(),'الإجابة المقترحة');
+    assert.equal(await page.locator('#confidence').textContent(),'تقدير ثقة النموذج: 95٪');
+    assert.deepEqual(h.errors,[]);
+  }finally{await h.close();}
 });

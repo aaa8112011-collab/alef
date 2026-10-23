@@ -77,7 +77,7 @@ function getConfig(options) {
 
 const canonicalModel = name => name.split('/').at(-1).includes(':') ? name : `${name}:latest`;
 async function getHealth(config) {
-  const base = { ok: true, protocolVersion:3, capabilities:{multiDropdown:true,mathField:true}, configured: false, provider: config.provider, model: config.model, modelReady: false,
+  const base = { ok: true, protocolVersion:3, capabilities:{multiDropdown:true,mathField:true,uncertainAnswers:true}, configured: false, provider: config.provider, model: config.model, modelReady: false,
     ...(config.provider === 'ollama' ? {visionModel:config.visionModel,visionInstalled:false,visionReady:false} : {}) };
   if (config.provider === 'openai') return { ...base, configured: Boolean(config.apiKey), ...(!config.apiKey ? { issue: 'not_configured', message: 'الوضع المدفوع يحتاج مفتاح خدمة؛ يمكنك استخدام وضع Ollama المحلي المجاني بدلًا منه.' } : {}) };
   const signal = AbortSignal.timeout(config.healthTimeoutMs);

@@ -625,6 +625,26 @@ test('answers identify their subject and lesson, distinguish submission, and cle
  }finally{await harness.close();}
 });
 
+test('fast retry attempts are labelled separately without a model confidence or a recovered-score claim',async()=>{
+ const h=await dashboardHarness({connected:true});
+ try{
+  await h.page.evaluate(()=>{
+   const question={id:'retry',fingerprint:'retry',text:'ما ناتج ٢ + ٢؟',options:[{id:'a',text:'٤'},{id:'b',text:'٥'}]};
+   const currentLesson={id:'lesson',name:'محاولات السؤال'};
+   __uiTest.emit({kind:'question',question,currentLesson,message:'السؤال الحالي'});
+   __uiTest.emit({kind:'submitted',question,currentLesson,retryAttempt:true,retryNumber:2,submitted:true,applied:true,
+     answer:{optionIds:['b'],text:'',explanation:'محاولة سريعة لإنهاء المحاولات بعد الرفض.'},message:'أُرسلت محاولة سريعة'});
+  });
+  assert.equal(await h.page.locator('#answer-label').textContent(),'محاولة سريعة مُرسلة');
+  assert.equal(await h.page.locator('#confidence').textContent(),'');
+  assert.match(await h.page.locator('#answer-state').textContent(),/لا تعني استعادة درجة/);
+  assert.equal(await h.page.locator('#answer-text').textContent(),'٥');
+  await h.page.evaluate(()=>__uiTest.emit({kind:'question',message:'سؤال جديد',question:{id:'new',text:'ما ناتج ٣ + ٣؟',options:[]}}));
+  assert.equal(await h.page.locator('#answer-box').isHidden(),true);
+  assert.equal(await h.page.locator('#answer-label').textContent(),'الإجابة المقترحة');
+ }finally{await h.close();}
+});
+
 test('blocking review keeps lesson context and leaves later lessons pending without showing review as completion',async()=>{
  const harness=await dashboardHarness({connected:true});
  try{

@@ -20,6 +20,7 @@ let lessonQueue = [];
 let lessonStats = {};
 let answerLessonKey = null;
 let displayedQuestion = null;
+let displayedRetryAttempt = false;
 let pairingSaveRevision = 0;
 let pendingPairingSave = Promise.resolve();
 const lessonStatuses = {pending:'بانتظار البدء',running:'جارٍ العمل',completed:'مكتمل',review:'يحتاج مراجعة',locked:'مقفل',alreadycompleted:'مكتمل سابقًا'};
@@ -154,6 +155,7 @@ function renderLessonQueue(queue, stats, currentLesson) {
 }
 function clearAnswer({resetLesson=false}={}) {
   displayedQuestion=null;
+  displayedRetryAttempt=false;
   if(resetLesson) {
     answerLessonKey=null;
     $('answer-subject').textContent='';$('answer-lesson').textContent='';
@@ -191,22 +193,24 @@ function showAnswer(event) {
     $('answer-state').dataset.state='working';
   }
   if (event.answer) {
+    displayedRetryAttempt=event.retryAttempt===true;
     $('answer-empty').hidden=true;$('answer-content').hidden=false;
     $('answer-box').hidden = false;
     const question=event.question||displayedQuestion;
     const selected = question?.options?.filter(option=>event.answer.optionIds?.includes(option.id)).map(option=>option.text) || [];
     const pairs=event.answer.matches?.map(pair=>`${question?.items?.find(item=>item.id===pair.itemId)?.text||pair.itemId} ← ${question?.targets?.find(item=>item.id===pair.targetId)?.text||pair.targetId}`)||[];
     const answerText=pairs.length?pairs.join('\n'):selected.length?selected.join('، '):(event.answer.text||'').trim();
-    $('answer-label').textContent=answerText?'الإجابة المقترحة':'تعذّر إكمال الحل';
+    $('answer-label').textContent=answerText?(displayedRetryAttempt?'محاولة سريعة بعد الرفض':'الإجابة المقترحة'):'تعذّر إكمال الحل';
     $('answer-text').textContent=answerText||'لم تُحدَّد إجابة من البيانات المقروءة';
     $('explanation').textContent = event.answer.explanation || '';
     const confidence = Number(event.answer.confidence);
-    $('confidence').textContent = Number.isFinite(confidence) ? `تقدير ثقة النموذج: ${Math.round(confidence*100)}٪` : '';
-    $('answer-state').textContent='وصلت الإجابة؛ جارٍ تطبيقها على السؤال في ألف…';$('answer-state').dataset.state='working';
+    $('confidence').textContent = !displayedRetryAttempt&&Number.isFinite(confidence) ? `تقدير ثقة النموذج: ${Math.round(confidence*100)}٪` : '';
+    $('answer-state').textContent=displayedRetryAttempt?'جارٍ تطبيق محاولة سريعة بعد رفض الإجابة الأولى…':'وصلت الإجابة؛ جارٍ تطبيقها على السؤال في ألف…';$('answer-state').dataset.state='working';
   }
   if(event.kind==='submitted'&&event.submitted===true) {
-    $('answer-label').textContent='الإجابة المُرسلة';
-    $('answer-state').textContent='أُرسلت الإجابة إلى ألف؛ جارٍ انتظار النتيجة أو السؤال التالي.';
+    displayedRetryAttempt=event.retryAttempt===true||displayedRetryAttempt;
+    $('answer-label').textContent=displayedRetryAttempt?'محاولة سريعة مُرسلة':'الإجابة المُرسلة';
+    $('answer-state').textContent=displayedRetryAttempt?'أُرسلت محاولة سريعة بعد الرفض؛ لا تعني استعادة درجة المحاولة الأولى.':'أُرسلت الإجابة إلى ألف؛ جارٍ انتظار النتيجة أو السؤال التالي.';
     $('answer-state').dataset.state='submitted';
   } else if(['review','error'].includes(event.kind)&&event.blocking!==false) {
     $('answer-state').textContent=event.applied===true

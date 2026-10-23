@@ -1,6 +1,6 @@
 {
   "name": "alef-assistant",
-  "version": "0.5.5",
+  "version": "0.5.6",
   "private": true,
   "description": "مساعد محلي بواجهة عربية وإضافة Chrome لقراءة أسئلة ألف وحلها مع التحقق",
   "type": "module",

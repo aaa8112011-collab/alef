@@ -279,15 +279,15 @@ test('actual Pathways hierarchy runs each level practice once rather than repeat
  assert.equal((await worker.send({type:'GET_STATE'})).state.stats.lessonsCompleted,2);
 });
 
-test('wrong-answer feedback uses a bounded explicit retry and never resubmits the same rejected choice',async t=>{
+test('wrong-answer feedback uses the explicit retry before a valid local alternative without another model call',async t=>{
  const h=await harness(t);
  await h.page.evaluate(()=>{
   const main=document.querySelector('main');window.retryState={submitted:[],retryClicks:0};
   const question=()=>{main.innerHTML='<section data-alef-question="retry-q"><h2>ما ناتج 6 × 7؟</h2><label data-alef-option="a"><input type="radio" name="retry">36</label><label data-alef-option="b"><input type="radio" name="retry">42</label><button data-alef-submit>Submit answer</button></section>';document.querySelector('[data-alef-submit]').onclick=()=>{const selected=document.querySelector('input:checked')?.parentElement.dataset.alefOption;window.retryState.submitted.push(selected);if(selected==='b'){main.innerHTML='<section data-alef-completed>Lesson completed</section>';return;}const retry=document.createElement('button');retry.textContent='Try again';retry.onclick=()=>{window.retryState.retryClicks++;question();};main.firstElementChild.append(retry);};};
   main.innerHTML='<button data-alef-subject="math">الرياضيات</button>';main.firstElementChild.onclick=question;
  });
- let calls=0;const worker=await runCourse(h,(_url,options)=>{const body=JSON.parse(options.body);calls++;if(calls===2)assert.ok(body.question.text.includes('previous answers'));return Promise.resolve(Response.json({answer:{optionIds:[calls===1?'a':'b'],text:calls===1?'36':'42',explanation:'مزود اختبار',confidence:.99},verified:true,needsReview:false}));});
- await waitFor(()=>complete(worker),()=>JSON.stringify(worker.events));const actual=await h.page.evaluate(()=>window.retryState);assert.deepEqual(actual.submitted,['a','b']);assert.equal(actual.retryClicks,1);assert.equal(calls,2);
+ let calls=0;const worker=await runCourse(h,()=>{calls++;return Promise.resolve(Response.json({answer:{optionIds:['a'],text:'36',explanation:'مزود اختبار',confidence:.99},verified:true,needsReview:false}));});
+ await waitFor(()=>complete(worker),()=>JSON.stringify(worker.events));const actual=await h.page.evaluate(()=>window.retryState);assert.deepEqual(actual.submitted,['a','b']);assert.equal(actual.retryClicks,1);assert.equal(calls,1);
 });
 
 for(const scenario of ['normal','empty-home']){

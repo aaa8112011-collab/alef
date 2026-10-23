@@ -380,6 +380,33 @@ async function prepareCatalog(tabId,initial,config,origin,signal,{expandAll=fals
 }
 const sameQuestion = (snapshot,question) => snapshot?.question?.id === question.id &&
   snapshot.question.fingerprint === question.fingerprint;
+const retryAction = snapshot => snapshot?.navigation?.find(action=>action.kind==='retry');
+const retryRequired = snapshot => !!retryAction(snapshot)||snapshot?.feedback==='wrong'&&
+  !snapshot.navigation?.some(action=>['next','finish'].includes(action.kind));
+const retryAnswerKey = answer => answer.optionIds?.length?JSON.stringify([...answer.optionIds].sort()):answer.matches?
+  JSON.stringify([...answer.matches].sort((a,b)=>a.itemId.localeCompare(b.itemId))):(answer.text||'').normalize('NFKC').trim();
+function fastRetryAnswer(question,previous,tried,retryNumber) {
+  const base={optionIds:[],text:'',explanation:'محاولة سريعة بعد رفض الإجابة الأولى؛ لا تمثل حلًا جديدًا أو استعادة درجة السؤال.'};
+  if(['single','multiple'].includes(question.type)) {
+    const options=question.options||[];
+    if(!options.length)return null;
+    // Exhaust untried valid IDs first, then cycle them if the platform keeps
+    // offering Try Again. Never generate a label or position as an option ID.
+    const candidates=options.map(option=>({...base,optionIds:[option.id]}));
+    const previousIndex=candidates.findIndex(answer=>retryAnswerKey(answer)===retryAnswerKey(previous));
+    return candidates.find(answer=>!tried.has(retryAnswerKey(answer)))||candidates[
+      previousIndex<0?(retryNumber-1)%candidates.length:(previousIndex+1)%candidates.length];
+  }
+  if(question.type==='text')return typeof previous.text==='string'&&previous.text.trim()?{...base,text:previous.text}:null;
+  if(question.type==='matching') {
+    const pairs=previous.matches;
+    if(!Array.isArray(pairs)||pairs.length!==question.items?.length||new Set(pairs.map(pair=>pair.itemId)).size!==pairs.length||
+      new Set(pairs.map(pair=>pair.targetId)).size!==pairs.length||pairs.some(pair=>!question.items.some(item=>item.id===pair.itemId)||
+        !question.targets?.some(target=>target.id===pair.targetId)))return null;
+    return {...base,matches:pairs.map(({itemId,targetId})=>({itemId,targetId}))};
+  }
+  return null;
+}
 function questionContext(snapshot) {
   return {...(snapshot.frameContext||{}),frameId:snapshot.frameContext?.frameId||0,
     topPageKey:lessonPageKey(snapshot.page?.url)};
@@ -427,6 +454,9 @@ async function waitSnapshot(tabId,config,origin,signal,predicate=()=>true,timeou
 }
 function pendingLessonPlayer(snapshot,config) {
   if(snapshot?.permissionRequired||snapshot?.completed||snapshot?.stage==='complete')return false;
+  // Rejected answers can unmount or disable their inputs while keeping the
+  // explicit retry control. That is feedback to handle, not a loading player.
+  if(retryAction(snapshot)||snapshot?.feedback==='wrong')return false;
   // A real question can coexist with a persistent progress bar. That bar must
   // not turn a ready exercise into an endless loading state.
   if(snapshot?.stage==='question'&&snapshot.question||snapshot?.needsPreparation)return false;
@@ -463,7 +493,7 @@ async function afterSubmission(tabId,question,config,origin,signal) {
   while (Date.now()-started < 15000) {
     assertActive(signal);
     last = await inspect(tabId,config,origin,signal);
-    if (last.feedback==='wrong')return last;
+    if (retryRequired(last))return last;
     const ready=last.permissionRequired||blockedLessonMessage(last)||last.completed||last.stage==='complete'||last.stage==='lessons'||
       last.question&&!sameQuestion(last,question)||last.needsPreparation;
     // A question may unmount before its Next transition finishes. Do not hand
@@ -600,9 +630,8 @@ async function runLesson(tabId,subject,initial,lesson,config,origin,signal,state
   let introActions = 0;
   const seenQuestions = new Set();
   const clicked = new Set();
-  const rejectedAnswers = new Map();
   let lastSubmitted = null;
-  const answerKey=answer=>answer.optionIds?.length?JSON.stringify([...answer.optionIds].sort()):answer.matches?JSON.stringify([...answer.matches].sort((a,b)=>a.itemId.localeCompare(b.itemId))):(answer.text||'').normalize('NFKC').trim();
+  let retryState = null;
   while (true) {
     assertActive(signal);
     if(snapshot.navigationPending)return {review:true,snapshot,
@@ -652,23 +681,53 @@ async function runLesson(tabId,subject,initial,lesson,config,origin,signal,state
       snapshot=await waitSnapshot(tabId,config,origin,signal,item=>snapshotKey(item)!==before&&item.stage!=='unknown');
       continue;
     }
+    if(retryRequired(snapshot)) {
+      const retry=retryAction(snapshot);
+      if(!retry||!lastSubmitted||snapshot.question&&!sameQuestion(snapshot,lastSubmitted.question))return {review:true,snapshot,
+        message:'لم يظهر زر إعادة محاولة مرتبط بآخر إجابة مُرسلة؛ توقف التشغيل في السؤال الحالي.'};
+      const context=lastSubmitted.context;
+      await validateFrameLocation(tabId,context,origin,signal);
+      if((snapshot.frameContext?.frameId||0)!==context.frameId||context.documentId&&snapshot.frameContext?.documentId!==context.documentId)
+        return {review:true,snapshot,message:'تغير إطار السؤال قبل إعادة المحاولة؛ لم تُطبّق إجابة على إطار آخر.'};
+      if(!retryState||!sameQuestion({question:retryState.question},lastSubmitted.question))retryState={question:lastSubmitted.question,
+        retries:0,tried:new Set([retryAnswerKey(lastSubmitted.answer)])};
+      if(retryState.retries>=20)return {review:true,snapshot,cause:'retry_limit',message:'وصل السؤال إلى حد 20 محاولة سريعة دون انتقال. توقف التشغيل في السؤال الحالي.'};
+      const retryNumber=retryState.retries+1;
+      await emit(tabId,'status',`المحاولة السريعة ${retryNumber}: ضغط إعادة المحاولة قبل الإجابة…`,{phase:'retrying',retryAttempt:true,retryNumber});
+      await navigate(tabId,snapshot,retry,config,origin,signal);
+      snapshot=await waitSnapshot(tabId,config,origin,signal,item=>item.permissionRequired||blockedLessonMessage(item)||item.completed||item.stage==='complete'||
+        !retryAction(item)&&item.feedback!=='wrong'&&(item.question||item.needsPreparation),6000);
+      if(snapshot.permissionRequired||blockedLessonMessage(snapshot)||snapshot.completed||snapshot.stage==='complete')continue;
+      if(retryAction(snapshot)||snapshot.feedback==='wrong')return {review:true,snapshot,message:'لم يستجب زر إعادة المحاولة؛ لم تُكرر النقرة أو تُرسل إجابة قبل فتح السؤال.'};
+      if(snapshot.needsPreparation) {
+        await pageMessage(tabId,{type:'ALEF_PREPARE_QUESTION',selectors:config.selectors},origin,signal);
+        snapshot=await inspect(tabId,config,origin,signal);
+      }
+      if(!snapshot.question||!sameQuestion(snapshot,retryState.question))return {review:true,snapshot,
+        message:'تغير السؤال بعد إعادة المحاولة؛ لم تُرسل محاولة سريعة إلى سؤال مختلف.'};
+      if((snapshot.frameContext?.frameId||0)!==context.frameId||context.documentId&&snapshot.frameContext?.documentId!==context.documentId)
+        return {review:true,snapshot,message:'تغير إطار السؤال بعد إعادة المحاولة؛ لم تُطبّق إجابة على إطار آخر.'};
+      const question=snapshot.question,answer=fastRetryAnswer(question,lastSubmitted.answer,retryState.tried,retryNumber);
+      if(!answer)return {review:true,snapshot,message:'تعذرت مطابقة المحاولة السريعة مع أدوات السؤال الحالية. بقي التشغيل في السؤال الحالي.'};
+      const currentContext=questionContext(snapshot);
+      await validateFrameLocation(tabId,context,origin,signal);
+      await validateQuestionContext(tabId,question,currentContext,config,origin,signal);
+      await emit(tabId,'answer',`تطبيق محاولة سريعة بعد الرفض (${retryNumber})…`,{question,answer,retryAttempt:true,retryNumber});
+      const applied=await pageMessage(tabId,{type:'ALEF_APPLY',questionId:question.id,questionFingerprint:question.fingerprint,
+        answer,selectors:config.selectors,autoSubmit:config.autoSubmit},origin,signal,currentContext.frameId,currentContext.documentId);
+      if(!applied.submitted)return {review:true,blocking:true,snapshot,question,answer,applied:applied.applied===true,
+        message:applied.reason||'تم اختيار المحاولة السريعة دون إرسال مؤكد. توقف التشغيل في السؤال الحالي.'};
+      retryState.retries++;retryState.tried.add(retryAnswerKey(answer));state.stats.solved++;
+      lastSubmitted={question,answer,context:currentContext};
+      await emit(tabId,'submitted',`أُرسلت محاولة سريعة بعد الرفض (${retryNumber})؛ انتظار نتيجة ألف…`,
+        {question,answer,applied:true,submitted:true,retryAttempt:true,retryNumber});
+      snapshot=await afterSubmission(tabId,question,config,origin,signal);
+      continue;
+    }
     if(snapshot.needsPreparation) {
       await pageMessage(tabId,{type:'ALEF_PREPARE_QUESTION',selectors:config.selectors},origin,signal);
       snapshot=await inspect(tabId,config,origin,signal);
       if(snapshot.needsPreparation)return {review:true,snapshot,message:'لم تظهر خيارات القائمة المنسدلة بوضوح.'};
-      continue;
-    }
-    if(snapshot.feedback==='wrong'){
-      const q=snapshot.question;
-      const identity=q&&`${q.id}:${q.fingerprint}`;
-      const rejected=rejectedAnswers.get(identity)||[];
-      const retry=snapshot.navigation?.find(action=>action.kind==='retry');
-      if(!q||!lastSubmitted||!sameQuestion(snapshot,lastSubmitted.question)||rejected.length>=2||!retry)return {review:true,snapshot,message:'لم يُقبل الحل بعد المحاولات المتاحة. سُجّل الدرس للمراجعة بدل تكرار الإجابة.'};
-      rejected.push(lastSubmitted.answer);rejectedAnswers.set(identity,rejected);
-      await emit(tabId,'status','رفض الموقع الإجابة؛ إعادة التحقق مع استبعاد الحل المرفوض…');
-      await navigate(tabId,snapshot,retry,config,origin,signal);
-      snapshot=await waitSnapshot(tabId,config,origin,signal,item=>item.stage==='question'&&item.feedback!=='wrong',6000);
-      seenQuestions.delete(identity);
       continue;
     }
     if (snapshot.stage === 'question' && snapshot.question) {
@@ -682,8 +741,7 @@ async function runLesson(tabId,subject,initial,lesson,config,origin,signal,state
       await emit(tabId,'question',question.requiresVision?'قراءة الرسم أو الصورة ثم حل السؤال ومراجعة النتيجة…':
         config.qualityMode?'جارٍ حل السؤال بوضع الدقة الأعلى…':config.verify?'جارٍ حل السؤال ثم التحقق بحل ثانٍ…':'جارٍ حل السؤال بالوضع السريع…',{question});
       let result;
-      const rejected=rejectedAnswers.get(identity)||[];
-      let requestQuestion=rejected.length?{...question,text:question.text+'\n\nPlatform feedback: these previous answers were rejected. Re-evaluate the question carefully. Do not repeat a rejected answer; lower confidence if the question is unclear.\n'+JSON.stringify(rejected.map(answer=>({optionIds:answer.optionIds,text:answer.text,matches:answer.matches})))}:question;
+      let requestQuestion=question;
       if(config.qualityMode||question.requiresVision)await checkAccuracyBackend(config,signal,question.requiresVision);
       if(question.requiresVision)requestQuestion=await captureQuestionImages(tabId,requestQuestion,config,origin,signal,context);
       const solveStarted=Date.now();
@@ -691,7 +749,6 @@ async function runLesson(tabId,subject,initial,lesson,config,origin,signal,state
       catch (error) { error.fatal = true;throw error; }
       assertActive(signal);
       const answer = result.answer;
-      if(answer&&rejected.some(previous=>answerKey(previous)===answerKey(answer)))return {review:true,snapshot,question,answer,message:'عاد النموذج إلى إجابة سبق رفضها؛ لم تُرسل مرة أخرى.'};
       if (result.needsReview || !answer || !Number.isFinite(answer.confidence) || answer.confidence < config.minConfidence || (config.verify && result.verified !== true)) {
         return {review:true,snapshot,question,answer,cause:result.reason||'answer_requires_review',message:reviewMessages[result.reason] ||
           'الإجابة تحتاج مراجعة: الثقة منخفضة أو لم تتفق عمليتا الحل والتحقق.'};
@@ -707,7 +764,8 @@ async function runLesson(tabId,subject,initial,lesson,config,origin,signal,state
           'تم اختيار الإجابة. راجعها وأرسلها يدويًا؛ الإرسال التلقائي متوقف.'};
       }
       state.stats.solved++;
-      lastSubmitted={question,answer};
+      retryState=null;
+      lastSubmitted={question,answer,context};
       await emit(tabId,'submitted','أُرسلت الإجابة. انتظار السؤال التالي…',{question,answer,applied:true,submitted:true});
       await pause(300,signal);
       snapshot = await afterSubmission(tabId,question,config,origin,signal);

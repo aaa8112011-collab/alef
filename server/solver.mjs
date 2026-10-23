@@ -154,6 +154,9 @@ export function validateSolveInput(input) {
   if (['text', 'matching', 'dropdowns'].includes(q.type) && q.options.length !== 0) {
     throw new SolverError('invalid_request', 'السؤال النصي أو سؤال المطابقة لا يقبل قائمة خيارات.', 400);
   }
+  if (q.answerFormat !== undefined && (q.type !== 'text' || q.answerFormat !== 'latex')) {
+    throw new SolverError('invalid_request', 'تنسيق محرر الإجابة غير صالح؛ LaTeX متاح لحقل إجابة نصي فقط.', 400);
+  }
   const ids = new Set();
   for (const option of q.options) {
     if (!plainObject(option) || !boundedString(option.id, 128) || !boundedString(option.text, 4000) || ids.has(option.id)) {
@@ -183,6 +186,7 @@ export function validateSolveInput(input) {
       id: q.id,
       text: q.text.trim(),
       type: q.type,
+      ...(q.answerFormat === 'latex' ? {answerFormat:'latex'} : {}),
       options: q.options.map(({ id, text }) => ({ id, text: text.trim() })),
       ...matching,
       ...dropdowns,
@@ -264,6 +268,8 @@ For dropdowns questions, return optionIds: [], text: "", and a complete selectio
 Do not invent missing images, equations, context, option IDs, item IDs, or target IDs. If the question is incomplete or uncertain, set confidence below 0.85. Confidence is your estimate and is not a guarantee.`;
 
 const accuracyInstruction = `\nAccuracy is more important than speed. Read the entire Arabic or English problem and every option before solving. Preserve Arabic diacritics and distinguish Arabic-Indic/Persian digits from option IDs. Work through the calculation and check it independently before choosing. For a dilation, use image-coordinate/original-coordinate (not its reciprocal), check a second corresponding point, and distinguish primed from unprimed labels. For polynomial or fractional expressions preserve parentheses, signs and exponents. When images are attached, inspect all referenced figures and option images; do not infer unreadable coordinates or a missing diagram. If essential details cannot be read, use confidence below 0.85 and explain the missing evidence in Arabic. Return only the final requested JSON, never reasoning tokens or extra prose.`;
+
+const latexInstruction = `\nThis text question uses a MathLive math editor (answerFormat: latex). Put ONLY the requested mathematical expression in the JSON text field, using valid LaTeX, with no prose, Markdown, code fences, or surrounding math delimiters. Keep the Arabic explanation in explanation only. Preserve the exact mathematical form requested by the question. Prefer an exact fraction in LaTeX when a fraction or ratio is required; do not replace it with an equivalent decimal merely because they have the same numerical value. Do not include units or an equation unless the question requests them. Check signs, parentheses, exponents, variable case, and the direction of any ratio independently. The platform can compare literal mathematical form, so numerical equivalence alone does not justify changing the requested form.`;
 
 const visionCapabilities = new WeakMap();
 export async function checkVisionModel(config, signal) {
@@ -383,7 +389,7 @@ async function requestAnswer(input, config, signal, secondPass) {
   const model = isLocal && hasImages ? config.visionModel || 'qwen3-vl:8b' : config.model;
   const thinking = input.qualityMode && !hasImages && /(?:^|\/)qwen3(?::|$)/i.test(model);
   const messages = [
-    { role: 'system', content: instruction + (input.qualityMode || hasImages ? accuracyInstruction : '') + (secondPass ? '\nSolve independently from the original evidence. Recompute without assuming the first solution; read every relevant image and double-check your reasoning before giving the JSON answer.' : '') },
+    { role: 'system', content: instruction + (input.qualityMode || hasImages ? accuracyInstruction : '') + (input.question.answerFormat === 'latex' ? latexInstruction : '') + (secondPass ? '\nSolve independently from the original evidence. Recompute without assuming the first solution; read every relevant image and double-check your reasoning before giving the JSON answer.' : '') },
     { role:'user', content:!isLocal && hasImages ? [{type:'text',text}, ...images.map(data=>({type:'image_url',image_url:{url:`data:${imageMime(data)};base64,${data}`,detail:'high'}}))] : text,
       ...(isLocal && hasImages ? {images} : {}) },
   ];
@@ -447,6 +453,9 @@ async function requestAnswer(input, config, signal, secondPass) {
 
 const canonicalText = text => text.normalize('NFKC').replace(/\s+/g, ' ').trim().toLocaleLowerCase();
 function answersAgree(first, second, question) {
+  // Case and mathematical form can be significant in an authored math field.
+  // Do not infer algebraic or decimal/fraction equivalence to bypass review.
+  if (question.answerFormat === 'latex') return first.text.trim() === second.text.trim();
   if (question.type === 'text') return canonicalText(first.text) === canonicalText(second.text);
   if (question.type === 'matching') {
     const canonicalPairs = matches => matches.map(({ itemId, targetId }) => JSON.stringify([itemId, targetId])).sort().join('\n');

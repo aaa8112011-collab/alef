@@ -1,7 +1,7 @@
 (() => {
   'use strict';
-  if (globalThis.__alefAssistantInstalled==='0.5.9') return;
-  globalThis.__alefAssistantInstalled = '0.5.9';
+  if (globalThis.__alefAssistantInstalled==='0.5.10') return;
+  globalThis.__alefAssistantInstalled = '0.5.10';
 
   let selectors = {};
   let subjects = new Map();
@@ -12,6 +12,7 @@
   let weaverDragCache = null;
   let cancelled = false;
   let lastDiagnosticInteraction = null;
+  const mathTargets = new Set();
   // A scan is synchronous and read-only. Share expensive DOM/style lookups
   // within that scan, then discard them before any click or asynchronous wait.
   let readPass = null;
@@ -95,7 +96,9 @@
       if(!root || seen.has(root))return;
       seen.add(root);found.push(root);
       for(const node of root.querySelectorAll('*')) {
-        if(node.shadowRoot)visit(node.shadowRoot);
+        // A MathLive host is one answer control. Its keyboard sink, rendered
+        // value and toolbar are private implementation details, not questions.
+        if(node.shadowRoot&&node.tagName!=='MATH-FIELD')visit(node.shadowRoot);
         if(node.tagName==='IFRAME' && visible(node)) {
           try {
             const doc=node.contentDocument;
@@ -610,7 +613,7 @@
     if(option.actual)return !!option.node.querySelector('.choice.selected,.input-placeholder.selected,.input-placeholder.selected-by-user,.choice-select.selected')||hasWeaverClass(option.node,'selected');
     return option.control.matches('input')?option.control.checked:option.control.getAttribute('aria-checked')==='true';
   }
-  const VISUAL_EXCLUSIONS=weaverSelector('.mcq-icon-container,.mcq-option-icon-container,.dnd-grip-icon,.katex,math,mjx-container,.MathJax,[data-testid$="question-feedback-container"],[data-testid="custom-feedback-container"],[data-testid="general-answer-feedback"],[data-testid="answerFeedback"],[data-testid="answer-feedback"],[data-testid="wrong-answer-feedback"],[data-testid="correct-answer-feedback"],[data-alef-feedback],[role="status"],[role="alert"],aside,nav,[role="banner"],[role="navigation"]');
+  const VISUAL_EXCLUSIONS=weaverSelector('.mcq-icon-container,.mcq-option-icon-container,.dnd-grip-icon,.katex,math,math-field,mjx-container,.MathJax,[data-testid$="question-feedback-container"],[data-testid="custom-feedback-container"],[data-testid="general-answer-feedback"],[data-testid="answerFeedback"],[data-testid="answer-feedback"],[data-testid="wrong-answer-feedback"],[data-testid="correct-answer-feedback"],[data-alef-feedback],[role="status"],[role="alert"],aside,nav,[role="banner"],[role="navigation"]');
   const MAX_VISUALS=3;
   const MAX_VISUAL_BYTES=1_048_576;
   const QUESTION_ROOTS='[data-alef-question],[data-question-id],[data-testid="question-renderer"],[data-testid="new-question-renderer"],'+WEAVER_QUESTIONS;
@@ -779,7 +782,7 @@
     return {ok:true,questionId:question.id,questionFingerprint:question.fingerprint,requiresVision:question.requiresVision,images};
   }
   const PROMPT_CONTEXT=weaverSelector('[data-alef-question-context],[data-testid="question-statement-container"],.question-statement-container');
-  const CONTEXT_CHROME='aside,nav,button,[role="button"],input,textarea,select,[role="banner"],[role="navigation"],[data-testid="ncle-main-contents"],[data-testid="ncle-sidebar"],[data-testid="progress-bar-slide-count"],[role="progressbar"]';
+  const CONTEXT_CHROME='aside,nav,button,[role="button"],input,textarea,select,math-field,[role="banner"],[role="navigation"],[data-testid="ncle-main-contents"],[data-testid="ncle-sidebar"],[data-testid="progress-bar-slide-count"],[role="progressbar"]';
   const PROMPT_FEEDBACK='[data-testid="general-answer-feedback"],[data-testid="answerFeedback"],[data-testid="answer-feedback"],[data-testid="correct-answer-feedback"],[data-alef-feedback],[data-testid="wrong-answer-feedback"],[data-testid$="question-feedback-container"],[data-testid="custom-feedback-container"],[role="status"],[role="alert"]';
   function promptBody(authored,{context=false,omitMediaUI=false,dropdownFields=[]}={}) {
     if(authored.nodeType===3)return visible(authored.parentElement)?clean(authored.textContent):'';
@@ -805,6 +808,7 @@
     copy.querySelectorAll(weaverSelector('.dnd-options-draggable,.dnd-options-draggable-overlay,.dnd-overlay')).forEach(node=>node.remove());
     copy.querySelectorAll('[data-testid^="fill-blank-dd-"]').forEach(node=>node.replaceWith(' [blank:'+node.getAttribute('data-testid').slice(14)+'] '));
     copy.querySelectorAll('[data-testid="draggableChoice"],[data-testid="choice-item-dd"],[data-testid="general-answer-feedback"],[data-testid="answerFeedback"],[data-testid="answer-feedback"],[data-testid="correct-answer-feedback"],[data-alef-feedback],[data-testid="wrong-answer-feedback"],[data-testid$="question-feedback-container"],[data-testid="custom-feedback-container"],[role="status"],[role="alert"]').forEach(node=>node.remove());
+    copy.querySelectorAll('math-field').forEach(node=>node.remove());
     copy.querySelectorAll('button,input,textarea,[data-alef-option],[data-testid="choice-item"],[role="radio"],[role="checkbox"],label,[data-testid="matching-choices"],[data-testid="matching-answers"],[data-testid^="matching-choice-"],[data-testid^="matching-answer-"],[data-alef-item],[data-alef-target],[role="listbox"],[class*="react-select"],[hidden],[aria-hidden="true"],script,style').forEach(node=>node.remove());
     if(context)copy.querySelectorAll(CONTEXT_CHROME).forEach(node=>node.remove());
     if(omitMediaUI)copy.querySelectorAll(MEDIA_UI).forEach(node=>node.remove());
@@ -913,10 +917,10 @@
     return options;
   }
   function textAnswerControls(container){
-    return all('textarea,[data-alef-answer],input[type="text"],input[type="number"],input:not([type])',container)
-      .filter(node=>node.matches('input,textarea')&&!node.matches('[role="combobox"]'));
+    return all('math-field,textarea,[data-alef-answer],input[type="text"],input[type="number"],input:not([type])',container)
+      .filter(node=>node.tagName==='MATH-FIELD'||node.matches('input,textarea')&&!node.matches('[role="combobox"]')&&!node.closest('math-field'));
   }
-  function editableTextAnswer(node){return !disabled(node)&&!node.readOnly&&node.getAttribute('aria-readonly')!=='true';}
+  function editableTextAnswer(node){return !disabled(node)&&!node.readOnly&&!node.hasAttribute('readonly')&&!node.hasAttribute('read-only')&&node.getAttribute('aria-readonly')!=='true';}
   function availableSelectOption(option){return !option.disabled&&!option.closest('optgroup[disabled]');}
   function feedback(container){
     const retry=all('button,[role="button"]').some(node=>!disabled(node)&&/^(try again|حاول مرة اخري|حاول مجددا)$/.test(norm(text(node))));
@@ -928,7 +932,6 @@
     if(completionVisible())return {ok:true,question:null,completed:true,canNext:false};
     const container=questionContainer();
     if(!container)return {ok:true,question:null,completed:false,canNext:!!button('next')};
-    if(first('math-field',container))throw new Error('هذا السؤال يستخدم محرر معادلات خاصًا؛ يلزم ربط المحرر قبل إدخال الإجابة.');
     if(first('[data-testid="question-passage-collapsed-caret"],[data-alef-passage-toggle][aria-expanded="false"]',container))return {ok:true,question:null,completed:false,needsPreparation:true,canNext:false};
     let prompt=promptText(container);
     const visuals=visualMetadata(visualNodes(container));
@@ -961,8 +964,9 @@
       type=[...types][0]==='checkbox'?'multiple':'single';
     }else{
       const inputs=textAnswerControls(container);
-      if(inputs.length!==1)throw new Error('هذا السؤال يحتاج نوع تفاعل لم يُربط بعد؛ لن تُرسل إجابة تخمينية.');
+      if(inputs.length!==1)throw new Error(inputs.some(node=>node.tagName==='MATH-FIELD')?'هذا السؤال يحتوي على عدة حقول إجابة؛ يدعم الربط الحالي محرر معادلات واحدًا فقط.':'هذا السؤال يحتاج نوع تفاعل لم يُربط بعد؛ لن تُرسل إجابة تخمينية.');
       type='text';
+      if(inputs[0].tagName==='MATH-FIELD')extra={answerFormat:'latex'};
     }
     if(!prompt&&visuals.length)prompt='اقرأ السؤال الظاهر في الصور المرفقة، ثم أجب اعتمادًا على بياناتها.';
     if(!prompt)throw new Error('لم يظهر نص السؤال بوضوح.');
@@ -1001,6 +1005,63 @@
       return now-stableSince>=160;
     },message);
   }
+  function clearMathTargets(){
+    for(const node of mathTargets)node.removeAttribute('data-alef-math-target');
+    mathTargets.clear();
+  }
+  function mathAnswerValue(value){
+    let latex=value.trim();
+    if(latex.startsWith('$$')&&latex.endsWith('$$'))latex=latex.slice(2,-2).trim();
+    else if(latex.startsWith('$')&&latex.endsWith('$'))latex=latex.slice(1,-1).trim();
+    else if(latex.startsWith('\\(')&&latex.endsWith('\\)')||latex.startsWith('\\[')&&latex.endsWith('\\]'))latex=latex.slice(2,-2).trim();
+    latex=latex.replace(/[\u0660-\u0669\u06f0-\u06f9]/g,char=>String(char.charCodeAt(0)-(char>='\u06f0'?0x6f0:0x660))).replace(/\u066b/g,'.').replace(/\u2212/g,'-');
+    if(!latex||latex.length>4096||/[\x00-\x08\x0b\x0c\x0e-\x1f`<>$]/.test(latex)||/\\(?:href|url|html\w*|includegraphics)\b/i.test(latex))throw new Error('إجابة محرر المعادلات ليست صيغة رياضية صالحة؛ لم يُدخل نص شرح أو تنسيق غير مدعوم.');
+    return latex;
+  }
+  function currentMathField(){
+    const fields=textAnswerControls(questionContainer());
+    if(fields.length!==1||fields[0].tagName!=='MATH-FIELD'||!editableTextAnswer(fields[0]))throw new Error('محرر المعادلات معطل أو تغير؛ انتظر زر حاول مرة أخرى.');
+    return fields[0];
+  }
+  async function applyMathField(question,answer,message){
+    const latex=mathAnswerValue(answer.text);
+    let marked=null;
+    const request=async(operation,value)=>{
+      assertNotCancelled();assertQuestion(question);
+      const node=currentMathField();
+      if(node!==marked){clearMathTargets();node.setAttribute('data-alef-math-target',crypto.randomUUID());mathTargets.add(node);marked=node;}
+      const response=await chrome.runtime.sendMessage({type:'ALEF_MATH_FIELD',operation,target:node.getAttribute('data-alef-math-target'),
+        expectedURL:node.ownerDocument.location.href,...(operation==='write'?{value}:{})});
+      assertNotCancelled();assertQuestion(question);
+      // A committed React render may replace the host while a read is pending.
+      // Reacquire it on the next read; never replay the write or submit.
+      if(operation==='read'&&node!==currentMathField())return null;
+      if(!response?.ok)throw new Error(response?.error||'تعذر ربط محرر المعادلات. حدّث الإضافة ثم حدّث صفحة ألف وأعد المحاولة.');
+      return response;
+    };
+    try{
+      const written=await request('write',latex);
+      if(!written.valid||written.disabled||written.readOnly||typeof written.value!=='string'||!written.value.trim())throw new Error('لم يقبل محرر المعادلات الصيغة المدخلة؛ لم تُرسل الإجابة.');
+      const expected=written.value,deadline=Date.now()+2000;
+      let lastControl=null,stableSince=0;
+      for(;;){
+        const state=await request('read'),node=currentMathField(),now=Date.now();
+        if(state?.valid&&!state.disabled&&!state.readOnly&&state.value===expected){
+          if(node!==lastControl){lastControl=node;stableSince=now;}
+          if(now-stableSince>=160)break;
+        }else{lastControl=null;stableSince=0;}
+        if(now>=deadline)throw new Error('لم يثبت الموقع إجابة محرر المعادلات؛ لم تُرسل الإجابة.');
+        await delay(40);
+      }
+      // Check the public editor value again immediately before clicking. The
+      // generic native-input setter cannot access a page-defined custom element
+      // from Chrome's isolated world, so all reads/writes use the narrow bridge.
+      return await submitAnswer(question,message,async()=>{
+        const final=await request('read');
+        return final?.valid&&final.value===expected&&!final.disabled&&!final.readOnly;
+      });
+    }finally{clearMathTargets();}
+  }
   async function submitAnswer(question,message,acknowledged=null){
     assertNotCancelled();assertQuestion(question);
     if(!message.autoSubmit)return {ok:true,applied:true,submitted:false};
@@ -1010,7 +1071,11 @@
     for(;;){
       assertNotCancelled();assertQuestion(question);
       const submit=button('submit');
-      if(submit&&(!acknowledged||acknowledged())){click(submit);return {ok:true,applied:true,submitted:true};}
+      if(submit&&(!acknowledged||await acknowledged())){
+        assertNotCancelled();assertQuestion(question);
+        if(button('submit')!==submit)continue;
+        click(submit);return {ok:true,applied:true,submitted:true};
+      }
       if(Date.now()>=deadline)return {ok:true,applied:true,submitted:false,reason:'لم يظهر زر إرسال متاح بعد تثبيت الإجابة؛ توقف التشغيل في هذا السؤال.'};
       await delay(40);
     }
@@ -1286,6 +1351,7 @@
       if(typeof answer.text!=='string'||!answer.text.trim()||answer.optionIds.length)throw new Error('الإجابة النصية غير صالحة.');
       const inputs=textAnswerControls(container);
       if(inputs.length!==1||!editableTextAnswer(inputs[0]))throw new Error('حقل الإجابة معطل أو غير قابل للكتابة؛ انتظر زر حاول مرة أخرى.');
+      if(question.answerFormat==='latex')return applyMathField(question,answer,message);
       const expected=textInputValue(inputs[0],answer.text);setValue(inputs[0],expected);assertQuestion(question);
       acknowledged=()=>{const current=textAnswerControls(questionContainer());return current.length===1&&editableTextAnswer(current[0])&&current[0].value===expected&&current[0].validity.valid;};
       await waitStableField(question,acknowledged,()=>textAnswerControls(questionContainer())[0],'لم يؤكد الموقع إدخال نص صالح؛ لم تُرسل الإجابة.');
@@ -1380,7 +1446,7 @@
       appRoots:[...document.querySelectorAll('#root,#app,app-root,[data-reactroot],main')].slice(0,8).map(node=>({
         tag:node.tagName,kind:node.matches('#root')?'root':node.matches('#app')?'app':node.matches('main')?'main':'app-root',
         children:node.childElementCount,visible:visible(node)}))};
-    return {ok:true,diagnostics:{version:'0.5.9',page:{url:cleanUrl(location.href)},stage:snapshot.stage,rendering,
+    return {ok:true,diagnostics:{version:'0.5.10',page:{url:cleanUrl(location.href)},stage:snapshot.stage,rendering,
       subjects:snapshot.subjects,lessons:snapshot.lessons.map(({href,...lesson})=>({...lesson,href:href?cleanUrl(href):undefined})),
       navigation:snapshot.navigation,issues:snapshot.diagnostics,frames:snapshot.frames,loading:snapshot.loading,
       ...(snapshot.questionEvidence?{questionEvidence:snapshot.questionEvidence}:{}),
@@ -1405,7 +1471,7 @@
       case 'ALEF_GET_VISUALS':return getVisuals(message);
       case 'ALEF_BEGIN':cancelled=false;return {ok:true};
       case 'ALEF_PREPARE_QUESTION':assertNotCancelled();return prepareQuestion();
-      case 'ALEF_CANCEL':cancelled=true;return {ok:true};
+      case 'ALEF_CANCEL':cancelled=true;clearMathTargets();return {ok:true};
       case 'ALEF_SELECT_SUBJECT':{
         cancelled=false;
         if(!subjects.size)discoverSubjects();const subject=subjects.get(message.subjectId);if(!subject)throw new Error('المادة المحددة لم تعد ظاهرة.');if(subject.node)click(subject.node);return {ok:true,selected:true};

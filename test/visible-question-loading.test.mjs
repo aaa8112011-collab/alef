@@ -29,7 +29,7 @@ test('an unprepared custom dropdown is ready for opening despite a persistent le
 });
 
 test('a visible unsupported answer tool keeps its precise reading error instead of pretending to load',async t=>{
-  const h=await mount(t,persistentProgress+'<section class="fib-container question-widget"><p>أوجد قيمة المتغير س.</p><math-field style="display:inline-block;width:150px;height:40px">x=</math-field></section>');
+  const h=await mount(t,persistentProgress+'<section class="fib-container question-widget"><p>أوجد قيمتي المتغيرين س وص.</p><math-field style="display:inline-block;width:150px;height:40px">x=</math-field><math-field style="display:inline-block;width:150px;height:40px">y=</math-field></section>');
   const s=await h.send({type:'ALEF_INSPECT'});
   assert.equal(s.stage,'question');assert.equal(s.question,null);assert.equal(s.loading,false);
   assert.ok(s.diagnostics.some(message=>/محرر معادلات/.test(message)),JSON.stringify(s));

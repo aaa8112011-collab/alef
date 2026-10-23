@@ -135,6 +135,86 @@ async function inject(tabId,origin,frameId=0) {
   await chrome.scripting.executeScript({target:{tabId,...(frameId?{frameIds:[frameId]}:{frameIds:[0]})},files:['content.js']});
   routeState(tabId).injected.add(frameId);
 }
+// Chrome isolates the reader from page-defined custom-element methods. This
+// fixed function runs in MAIN only for the marked MathLive field; no settings,
+// pairing token, selectors or executable source cross into the page world.
+function mathFieldMain(operation,target,value,expectedURL) {
+  try {
+    if(location.href!==expectedURL||!['read','write'].includes(operation)||
+      typeof target!=='string'||!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(target))throw Error('تغير مستند محرر المعادلات.');
+    const matches=[];
+    const visit=root=>{
+      for(const node of root.querySelectorAll('math-field'))if(node.getAttribute('data-alef-math-target')===target)matches.push(node);
+      for(const node of root.querySelectorAll('*'))if(node.shadowRoot)visit(node.shadowRoot);
+    };
+    visit(document);
+    if(matches.length!==1)throw Error('لم يعد محرر المعادلات المحدد ظاهرًا.');
+    const node=matches[0],definition=customElements.get('math-field');
+    if(!definition||!(node instanceof definition)||typeof node.setValue!=='function'||typeof node.getValue!=='function')throw Error('لم يكتمل تجهيز محرر المعادلات.');
+    const roots='.lib-fib-container.lib-question-widget,.fib-container.question-widget,.lib-open-ended-container.lib-question-widget,.open-ended-container.question-widget,[data-alef-question],[data-question-id],[data-testid="question-renderer"],[data-testid="new-question-renderer"]';
+    let question=null;
+    for(let owner=node.parentElement||node.getRootNode()?.host;owner;owner=owner.parentElement||owner.getRootNode()?.host)if(owner.matches(roots)){question=owner;break;}
+    if(!question||node.closest('form')&&!node.closest('main#player-container,[data-testid="assessment-content-player"],[data-testid="ncle-activity-page-player"]'))throw Error('المحرر ليس داخل سؤال مدعوم.');
+    const rendered=el=>{
+      if(!el.isConnected||!el.getClientRects().length)return false;
+      for(let owner=el;owner;owner=owner.parentElement||owner.getRootNode()?.host){
+        const style=getComputedStyle(owner);
+        if(owner.matches('[hidden],[inert],[aria-hidden="true"]')||style.display==='none'||['hidden','collapse'].includes(style.visibility))return false;
+      }
+      return true;
+    };
+    if(!rendered(node))throw Error('حقل المعادلات لم يعد ظاهرًا.');
+    const disabled=node.disabled===true||node.matches('[disabled],[aria-disabled="true"]')||!!node.closest('[inert],fieldset[disabled]');
+    const readOnly=node.readOnly===true||node.matches('[readonly],[read-only],[aria-readonly="true"]');
+    if(operation==='write'){
+      if(disabled||readOnly)throw Error('حقل المعادلات معطل أو غير قابل للكتابة.');
+      if(typeof value!=='string'||!value.trim()||value.length>4096)throw Error('صيغة إجابة المعادلات غير صالحة.');
+      node.setValue(value,{silenceNotifications:true});
+    }
+    // Capture canonical LaTeX before notifying React. A rejecting onInput may
+    // immediately restore its previous value, which later reads must expose.
+    const actual=node.getValue('latex');
+    if(typeof actual!=='string'||actual.length>4096)throw Error('تعذرت قراءة قيمة محرر المعادلات.');
+    const valid=!!actual.trim()&&Array.isArray(node.errors)&&node.errors.length===0;
+    if(operation==='write')node.dispatchEvent(new InputEvent('input',{bubbles:true,composed:true,inputType:'insertText',data:null}));
+    return {ok:true,value:actual,valid,disabled,readOnly};
+  }catch(error){return {ok:false,error:error.message||'تعذر التفاعل مع محرر المعادلات.'};}
+}
+async function mathFieldMessage(message,sender) {
+  const tabId=checkedTabId(sender.tab?.id),frameId=sender.frameId;
+  if(sender.id!==chrome.runtime.id||!Number.isSafeInteger(frameId)||frameId<0||
+    !['read','write'].includes(message.operation)||typeof message.target!=='string'||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(message.target)||
+    typeof message.expectedURL!=='string'||message.expectedURL!==sender.url||
+    message.operation==='write'&&(typeof message.value!=='string'||!message.value.trim()||message.value.length>4096))throw Error('طلب محرر المعادلات غير صالح.');
+  const controller=runs.get(tabId),routes=frameRoutes.get(tabId),state=states.get(tabId);
+  const bound=()=>{
+    if(!controller||controller.signal.aborted||runs.get(tabId)!==controller||!routes||routes.active!==frameId||
+      !routes.injected.has(frameId)||!state?.page?.url)throw Error('توقف تشغيل محرر المعادلات أو تغير إطار السؤال.');
+  };
+  bound();
+  const topOrigin=new URL(state.page.url).origin;
+  await checkedTab(tabId,topOrigin);bound();
+  const host=frameOrigin(sender.url,topOrigin);
+  if(!host||!await framePermission(host,topOrigin))throw Error('لا يوجد إذن لإطار محرر المعادلات.');
+  bound();
+  if(!chrome.webNavigation?.getAllFrames)throw Error('تعذر التحقق من مستند محرر المعادلات.');
+  const records=await chrome.webNavigation.getAllFrames({tabId});bound();
+  const record=records?.find(entry=>entry.frameId===frameId);
+  if(!record||record.errorOccurred||record.url!==message.expectedURL||
+    sender.documentId&&record.documentId!==sender.documentId)throw Error('تغير مستند محرر المعادلات قبل إدخال الإجابة.');
+  const target={tabId,...(sender.documentId?{documentIds:[sender.documentId]}:{frameIds:[frameId]})};
+  const results=await chrome.scripting.executeScript({world:'MAIN',target,func:mathFieldMain,
+    args:[message.operation,message.target,message.operation==='write'?message.value:null,message.expectedURL]});
+  bound();await checkedTab(tabId,topOrigin);bound();
+  if(!Array.isArray(results)||results.length!==1||results[0].frameId!==frameId||
+    sender.documentId&&results[0].documentId!==sender.documentId)throw Error('تغير إطار محرر المعادلات أثناء الإدخال.');
+  const result=results[0].result;
+  if(!result||result.ok!==true)throw Error(typeof result?.error==='string'?result.error:'لم يؤكد محرر المعادلات التفاعل.');
+  if(typeof result.value!=='string'||result.value.length>4096||typeof result.valid!=='boolean'||
+    typeof result.disabled!=='boolean'||typeof result.readOnly!=='boolean')throw Error('رد محرر المعادلات غير صالح.');
+  return {ok:true,value:result.value,valid:result.valid,disabled:result.disabled,readOnly:result.readOnly};
+}
 async function pageMessage(tabId,message,origin,signal,frameOverride,documentId) {
   if (signal) assertActive(signal);
   await checkedTab(tabId,origin);
@@ -555,6 +635,7 @@ async function solve(question,subject,config,signal) {
     response = await fetch(`${config.serverUrl}/api/solve`,{
       method:'POST',headers:{'Content-Type':'application/json','Authorization':`Bearer ${config.token}`},
       body:JSON.stringify({subject,question:{id:question.id,text:question.text,type:question.type,options:question.options,
+        ...(question.answerFormat?{answerFormat:question.answerFormat}:{}),
         ...(question.requiresVision?{requiresVision:true,images:question.images||[]}:{}),
         ...(question.type==='dropdowns'?{fields:question.fields}:{}),
         ...(question.type==='matching'?{items:question.items,targets:question.targets}:{})},verify:config.verify,qualityMode:config.qualityMode}),
@@ -624,6 +705,13 @@ async function checkDropdownBackend(config,signal,requiresVision) {
   assertActive(signal);
   if(config.backendHealth.capabilities?.multiDropdown!==true) {
     throw new Error('الخادم الحالي لا يدعم السؤال الذي يحتوي على عدة قوائم. أغلق نافذة START القديمة، وحدّث المشروع كاملًا بما فيه مجلد server، ثم شغّل START-WINDOWS.cmd من النسخة الجديدة. لم تُرسل إجابة ناقصة.');
+  }
+}
+async function checkMathFieldBackend(config,signal,requiresVision) {
+  await checkAccuracyBackend(config,signal,requiresVision);
+  assertActive(signal);
+  if(config.backendHealth.capabilities?.mathField!==true) {
+    throw new Error('الخادم الحالي لا يدعم إدخال المعادلات. أغلق نافذة START القديمة، وحدّث المشروع كاملًا بما فيه مجلد server، ثم شغّل START-WINDOWS.cmd من النسخة الجديدة.');
   }
 }
 async function captureQuestionImages(tabId,question,config,origin,signal,context) {
@@ -780,7 +868,8 @@ async function runLesson(tabId,subject,initial,lesson,config,origin,signal,state
         config.qualityMode?'جارٍ حل السؤال بوضع الدقة الأعلى…':config.verify?'جارٍ حل السؤال ثم التحقق بحل ثانٍ…':'جارٍ حل السؤال بالوضع السريع…',{question});
       let result;
       let requestQuestion=question;
-      if(question.type==='dropdowns')await checkDropdownBackend(config,signal,question.requiresVision);
+      if(question.answerFormat==='latex')await checkMathFieldBackend(config,signal,question.requiresVision);
+      else if(question.type==='dropdowns')await checkDropdownBackend(config,signal,question.requiresVision);
       else if(config.qualityMode||question.requiresVision)await checkAccuracyBackend(config,signal,question.requiresVision);
       if(question.requiresVision)requestQuestion=await captureQuestionImages(tabId,requestQuestion,config,origin,signal,context);
       const solveStarted=Date.now();
@@ -1110,6 +1199,11 @@ async function handle(message) {
   }
 }
 chrome.runtime.onMessage.addListener((message,sender,respond) => {
+  if(message?.type==='ALEF_MATH_FIELD') {
+    if(sender.id!==chrome.runtime.id||!sender.tab||sender.url?.startsWith(chrome.runtime.getURL('')))return false;
+    mathFieldMessage(message,sender).then(respond,error=>respond({ok:false,error:error.message||'تعذر التفاعل مع محرر المعادلات.'}));
+    return true;
+  }
   if (sender.id !== chrome.runtime.id || !sender.url?.startsWith(chrome.runtime.getURL('')) || message?.type === 'RUN_EVENT') return false;
   if (!['CONNECT','SCAN','GET_STATE','START','STOP','RESUME_FRAMES','DIAGNOSTICS'].includes(message?.type)) return false;
   handle(message).then(respond,error=>respond({ok:false,error:error.message || 'تعذر تنفيذ الطلب.'}));

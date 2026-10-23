@@ -267,15 +267,18 @@ test('Weaver single whole-number FIB uses the native controlled input and waits 
   assert.equal(await h.page.evaluate(() => window.weaverFixture.submissions), 1);
 });
 
-test('custom equation editors are reported without typing into an internal textarea or submitting', async t => {
+test('an unbridged equation editor never falls back to typing into its internal textarea or submitting', async t => {
   const h = await mount(t, 'text');
   await h.page.evaluate(() => {
     const input = document.querySelector('textarea');
     const editor = document.createElement('math-field'); input.replaceWith(editor); editor.append(input);
   });
-  const result = await h.send({type:'ALEF_GET_QUESTION'});
+  const read = await h.send({type:'ALEF_GET_QUESTION'});
+  assert.equal(read.question.type, 'text');
+  assert.equal(read.question.answerFormat, 'latex');
+  const result = await apply(h, read.question, answer([], '\\frac{3}{2}'));
   assert.equal(result.ok, false);
-  assert.match(result.error, /محرر معادلات/);
+  assert.match(result.error, /ربط محرر المعادلات/);
   assert.equal(await h.page.locator('textarea').inputValue(), '');
   assert.equal(await h.page.evaluate(() => window.weaverFixture.submissions), 0);
 });

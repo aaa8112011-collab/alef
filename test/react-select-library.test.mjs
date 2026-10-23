@@ -18,6 +18,11 @@ async function mount(t,settings={}){
   },settings);
   await h.page.addScriptTag({content:bundle});
   await h.page.waitForFunction(()=>window.__realSelect?.ready);
+  assert.equal(await h.page.locator('[data-alef-question],[data-question-id]').count(),0,'Discover the published widget, not a test-only question marker');
+  const initial=await h.send({type:'ALEF_INSPECT'});
+  assert.equal(initial.stage,'question',JSON.stringify(initial));
+  assert.equal(initial.needsPreparation,true,JSON.stringify(initial));
+  assert.equal(initial.loading,false,'A persistent lesson progress bar cannot hide ready answer controls');
   const prepared=await h.send({type:'ALEF_PREPARE_QUESTION'});
   assert.equal(prepared.ok,true,JSON.stringify(prepared));
   assert.ok(prepared.question,JSON.stringify(prepared));
@@ -45,6 +50,13 @@ for(const language of ['ar','en'])test(`${language}: actual React Select nested 
 
 test('actual React Select single-dropdown contract also acknowledges its nested authored label',async t=>{
   const {h,q}=await mount(t,{single:true});assert.equal(q.type,'single');
+  const result=await apply(h,q);assert.equal(result.submitted,true,JSON.stringify(result));
+  assert.equal(await h.page.evaluate(()=>window.__realSelect.submissions.length),1);
+});
+
+test('legacy unprefixed React Select widgets still prepare both fields and submit once',async t=>{
+  const {h,q}=await mount(t,{legacyClasses:true});assert.equal(q.type,'dropdowns');
+  assert.equal(await h.page.locator('.dropdown-container.question-widget').count(),1);
   const result=await apply(h,q);assert.equal(result.submitted,true,JSON.stringify(result));
   assert.equal(await h.page.evaluate(()=>window.__realSelect.submissions.length),1);
 });

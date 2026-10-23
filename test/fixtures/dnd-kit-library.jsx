@@ -2,18 +2,21 @@ import React,{useState,useEffect} from 'react';
 import {createRoot} from 'react-dom/client';
 import {DndContext,MouseSensor,useSensor,useSensors,useDraggable,useDroppable,pointerWithin} from '@dnd-kit/core';
 
+let legacyClasses=false;
+const w=value=>legacyClasses?value:value.split(/\s+/).filter(Boolean).map(token=>token.startsWith('lib-')?token:'lib-'+token).join(' ');
+
 function Word({word,selected}) {
   const {attributes,listeners,setNodeRef,isDragging}=useDraggable({id:word.id,disabled:selected});
   return <div ref={setNodeRef} {...listeners} {...attributes}
-    className={'dnd-options-draggable'+(isDragging?' is-dragging':'')+(selected?' is-selected':'')}
+    className={w('dnd-options-draggable'+(isDragging?' is-dragging':'')+(selected?' is-selected':''))}
     style={{display:'inline-block',border:'1px solid #777',padding:20,margin:10}}>{word.text}</div>;
 }
 function Blank({index,word}) {
   const {setNodeRef,isOver}=useDroppable({id:'droppable-'+index});
   return <span ref={setNodeRef} id={'droppable-'+index} data-index={index}
-    className={'dnd-droppable'+(isOver?' is-about-to-drop':'')+(word?' is-selected':'')}
+    className={w('dnd-droppable'+(isOver?' is-about-to-drop':'')+(word?' is-selected':''))}
     style={{display:'block',width:200,height:60,border:'1px solid #555',margin:20}}>
-    {word?<span className="selected-option">{word.text}</span>:null}
+    {word?<span className={w("selected-option")}>{word.text}</span>:null}
   </span>;
 }
 function Question({language,cancelOnOver=false,cancelAfterFinalDrop=false}) {
@@ -35,17 +38,18 @@ function Question({language,cancelOnOver=false,cancelAfterFinalDrop=false}) {
         },15);
       }
     }}>
-    <main><section className="dnd-container question-widget" data-alef-question="actual-dnd-kit">
+    <main id="player-container"><div data-testid="assessment-content-player"><div role="progressbar" style={{width:500,height:8,background:'#abd'}}>2/5</div><section className={w("dnd-container question-widget")}>
       <h2 data-testid="question-statement-container">{language==='ar'?'ضع كل كلمة في فراغها الصحيح.':'Place each word in its correct blank.'}</h2>
-      <div className="template-container">{[0,1].map(index=><Blank key={index} index={index} word={answers['droppable-'+index]}/>)}</div>
-      <div className="dnd-options-wrapper">{words.map(word=><Word key={word.id} word={word} selected={Object.values(answers).some(answer=>answer.id===word.id)}/>)}</div>
+      <div className={w("template-container")}>{[0,1].map(index=><Blank key={index} index={index} word={answers['droppable-'+index]}/>)}</div>
+      <div className={w("dnd-options-wrapper")}>{words.map(word=><Word key={word.id} word={word} selected={Object.values(answers).some(answer=>answer.id===word.id)}/>)}</div>
       <button data-alef-submit disabled={Object.keys(answers).length!==2} onClick={()=>{
         state.submitTimes.push(performance.now());state.submitted.push(answers);
       }}>Submit Answer</button>
-    </section></main>
+    </section></div></main>
   </DndContext>;
 }
 window.mountRealDndKit=settings=>{
+  legacyClasses=settings.legacyClasses===true;
   window.realDndKit={answers:{},starts:[],ends:[],releaseTimes:[],submitTimes:[],cancelled:0,submitted:[],ready:false,stopSent:false};
   document.body.innerHTML='<div id="dnd-kit-root"></div>';
   createRoot(document.querySelector('#dnd-kit-root')).render(<Question {...settings}/>);

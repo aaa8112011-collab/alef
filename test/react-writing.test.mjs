@@ -6,11 +6,14 @@ import {createBrowserHarness} from '../scripts/test-browser.mjs';
 
 const bundle=buildSync({entryPoints:[fileURLToPath(new URL('fixtures/react-writing.jsx',import.meta.url))],
   bundle:true,write:false,format:'iife',define:{'process.env.NODE_ENV':'"production"'}}).outputFiles[0].text;
-async function setup(t,{language='ar',kind='textarea',mode='normal'}={}) {
+async function setup(t,{language='ar',kind='textarea',mode='normal',legacyClasses=false}={}) {
   const h=await createBrowserHarness();t.after(()=>h.close());
   await h.page.addScriptTag({content:bundle});
-  await h.page.evaluate(settings=>window.mountReactWriting(settings),{language,kind,mode});
+  await h.page.evaluate(settings=>window.mountReactWriting(settings),{language,kind,mode,legacyClasses});
   await h.page.waitForFunction(()=>window.reactWriting?.ready);
+  assert.equal(await h.page.locator('[data-alef-question],[data-question-id]').count(),0,'Discover authored writing widgets without a test-only question marker');
+  const initial=await h.send({type:'ALEF_INSPECT'});assert.equal(initial.stage,'question',JSON.stringify(initial));
+  assert.equal(initial.loading,false,'A persistent lesson progress bar must not hide a ready writing question');
   const read=await h.send({type:'ALEF_GET_QUESTION'});assert.equal(read.ok,true,JSON.stringify(read));
   assert.equal(read.question.type,'text');
   return {h,apply:text=>h.send({type:'ALEF_APPLY',questionId:read.question.id,questionFingerprint:read.question.fingerprint,
@@ -22,6 +25,12 @@ for(const [language,text] of [['ar','العِلْمُ نورٌ'],['en','Knowledg
   assert.equal(result.ok,true,JSON.stringify(result));assert.equal(result.submitted,true);
   const state=await h.page.evaluate(()=>window.reactWriting);
   assert.deepEqual(state.changes,[text]);assert.equal(state.value,text);assert.deepEqual(state.submitted,[text]);
+});
+
+test('legacy unprefixed React writing root retains the committed answer before one submission',async t=>{
+  const {h,apply}=await setup(t,{legacyClasses:true}),result=await apply('إجابة عربية');
+  assert.equal(result.submitted,true,JSON.stringify(result));
+  assert.deepEqual(await h.page.evaluate(()=>window.reactWriting.submitted),['إجابة عربية']);
 });
 
 test('Arabic decimal digits update a real React controlled number field with the valid normalized value',async t=>{

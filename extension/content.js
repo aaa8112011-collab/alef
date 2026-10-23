@@ -1,7 +1,7 @@
 (() => {
   'use strict';
-  if (globalThis.__alefAssistantInstalled==='0.5.8') return;
-  globalThis.__alefAssistantInstalled = '0.5.8';
+  if (globalThis.__alefAssistantInstalled==='0.5.9') return;
+  globalThis.__alefAssistantInstalled = '0.5.9';
 
   let selectors = {};
   let subjects = new Map();
@@ -21,7 +21,18 @@
   let questionEvidence = null;
   const inferredOptions = new WeakMap();
   const clean = value => String(value || '').replace(/\s+/g, ' ').trim();
-  const WEAVER_QUESTIONS='.mcq-container.question-widget,.dropdown-container.question-widget,.open-ended-container.question-widget,.fib-container.question-widget,.dnd-container.question-widget';
+  // Weaver's published m()/w() class helper adds lib- to every CSS token.
+  // Keep legacy widgets readable, and expand only our literal built-in selectors:
+  // user-provided selectors and third-party math classes remain untouched.
+  const WEAVER_CLASSES=new Set(['mcq-container','dropdown-container','open-ended-container','fib-container','dnd-container',
+    'question-widget','question-statement-container','mcq-option-content-container','mcq-icon-container','mcq-option-icon-container',
+    'dnd-grip-icon','dropdown-input-field-container','dropdown-item','dropdown-item-cancel','dropdown-single-value-content',
+    'dnd-droppable','dnd-options-draggable','dnd-options-draggable-overlay','dnd-overlay','text-on-image','image-on-image',
+    'sequence-image','sequence-text','selected-option','dnd-droppable__edit-label-tab','validationIcon']);
+  const weaverSelector=literal=>literal.replace(/\.([a-zA-Z][\w-]*)/g,(match,name)=>
+    WEAVER_CLASSES.has(name)?`:is(.${name},.lib-${name})`:match);
+  const hasWeaverClass=(node,name)=>!!node&&(node.classList.contains(name)||node.classList.contains('lib-'+name));
+  const WEAVER_QUESTIONS=weaverSelector('.mcq-container.question-widget,.dropdown-container.question-widget,.open-ended-container.question-widget,.fib-container.question-widget,.dnd-container.question-widget');
   const PLAYER_SCOPES='[data-testid="assessment-content-player"],[data-testid="ncle-activity-page-player"],[data-testid="content-page-body-player"],main#player-container';
   const hash = text => {
     let n = 2166136261;
@@ -502,7 +513,7 @@
     // exercise. They must not hide a visible reader error behind a load timeout.
     // An empty question wrapper is still allowed to finish mounting its tools.
     const readyQuestion=!!question||questionState.needsPreparation===true||questionReadFailed&&!!questionNode&&!!first(
-      'input:not([type="hidden"]),textarea,select,[role="combobox"],[role="radio"],[role="checkbox"],[data-testid="choice-item"],.dnd-droppable,[data-alef-item],math-field',questionNode);
+      weaverSelector('input:not([type="hidden"]),textarea,select,[role="combobox"],[role="radio"],[role="checkbox"],[data-testid="choice-item"],.dnd-droppable,[data-alef-item],math-field'),questionNode);
     const loading=!loginPage()&&(frames.some(frame=>frame.required&&frame.loading===true)||
       !readyQuestion&&(document.readyState==='loading'||!!spinner));
     for(const frame of frames){
@@ -586,7 +597,7 @@
     const actual=node.matches('[data-testid="choice-item"]');
     const control=node.matches('input,[role="radio"],[role="checkbox"]')?node:node.querySelector('input[type="radio"],input[type="checkbox"],[role="radio"],[role="checkbox"]')||node;
     const weaver=node.matches('[data-testid="mcq-option-container"]');
-    const authored=weaver?first('[data-testid="mcq-item-label"],.mcq-option-content-container',node):null;
+    const authored=weaver?first(weaverSelector('[data-testid="mcq-item-label"],.mcq-option-content-container'),node):null;
     // Weaver's accessibility label gains “Selected/Correct” after clicking.
     // Authored option content and its option UUID remain stable across renders.
     let label=node.matches('input')?clean([...node.labels||[]].map(text).join(' ')||node.getAttribute('aria-label')||node.value):authored?text(authored):text(node);
@@ -596,10 +607,10 @@
     return {id,text:label,node,control,actual};
   }
   function selected(option) {
-    if(option.actual)return !!option.node.querySelector('.choice.selected,.input-placeholder.selected,.input-placeholder.selected-by-user,.choice-select.selected')||option.node.classList.contains('selected');
+    if(option.actual)return !!option.node.querySelector('.choice.selected,.input-placeholder.selected,.input-placeholder.selected-by-user,.choice-select.selected')||hasWeaverClass(option.node,'selected');
     return option.control.matches('input')?option.control.checked:option.control.getAttribute('aria-checked')==='true';
   }
-  const VISUAL_EXCLUSIONS='.mcq-icon-container,.mcq-option-icon-container,.dnd-grip-icon,.katex,math,mjx-container,.MathJax,[data-testid$="question-feedback-container"],[data-testid="custom-feedback-container"],[data-testid="general-answer-feedback"],[data-testid="answerFeedback"],[data-testid="answer-feedback"],[data-testid="wrong-answer-feedback"],[data-testid="correct-answer-feedback"],[data-alef-feedback],[role="status"],[role="alert"],aside,nav,[role="banner"],[role="navigation"]';
+  const VISUAL_EXCLUSIONS=weaverSelector('.mcq-icon-container,.mcq-option-icon-container,.dnd-grip-icon,.katex,math,mjx-container,.MathJax,[data-testid$="question-feedback-container"],[data-testid="custom-feedback-container"],[data-testid="general-answer-feedback"],[data-testid="answerFeedback"],[data-testid="answer-feedback"],[data-testid="wrong-answer-feedback"],[data-testid="correct-answer-feedback"],[data-alef-feedback],[role="status"],[role="alert"],aside,nav,[role="banner"],[role="navigation"]');
   const MAX_VISUALS=3;
   const MAX_VISUAL_BYTES=1_048_576;
   const QUESTION_ROOTS='[data-alef-question],[data-question-id],[data-testid="question-renderer"],[data-testid="new-question-renderer"],'+WEAVER_QUESTIONS;
@@ -767,7 +778,7 @@
     }
     return {ok:true,questionId:question.id,questionFingerprint:question.fingerprint,requiresVision:question.requiresVision,images};
   }
-  const PROMPT_CONTEXT='[data-alef-question-context],[data-testid="question-statement-container"],.question-statement-container';
+  const PROMPT_CONTEXT=weaverSelector('[data-alef-question-context],[data-testid="question-statement-container"],.question-statement-container');
   const CONTEXT_CHROME='aside,nav,button,[role="button"],input,textarea,select,[role="banner"],[role="navigation"],[data-testid="ncle-main-contents"],[data-testid="ncle-sidebar"],[data-testid="progress-bar-slide-count"],[role="progressbar"]';
   const PROMPT_FEEDBACK='[data-testid="general-answer-feedback"],[data-testid="answerFeedback"],[data-testid="answer-feedback"],[data-testid="correct-answer-feedback"],[data-alef-feedback],[data-testid="wrong-answer-feedback"],[data-testid$="question-feedback-container"],[data-testid="custom-feedback-container"],[role="status"],[role="alert"]';
   function promptBody(authored,{context=false,omitMediaUI=false,dropdownFields=[]}={}) {
@@ -784,14 +795,14 @@
       const style=styleOf(node);
       if(style.display==='none'||['hidden','collapse'].includes(style.visibility))copiedNodes[index].setAttribute('hidden','');
     });
-    copy.querySelectorAll('.dropdown-input-field-container,[data-testid="selectableChoice"],select,[role="combobox"]').forEach(node=>{
+    copy.querySelectorAll(weaverSelector('.dropdown-input-field-container,[data-testid="selectableChoice"],select,[role="combobox"]')).forEach(node=>{
       const original=originalNodes[copiedNodes.indexOf(node)];
       const fields=dropdownFields.filter(field=>original===field.node||original?.contains(field.node));
       if(dropdownFields.length>1&&fields.length>1){node.replaceWith(...node.childNodes);return;}
       node.replaceWith(dropdownFields.length>1&&fields.length===1?` [dropdown:${fields[0].id}] `:' [قائمة الإجابة] ');
     });
-    copy.querySelectorAll('.dnd-droppable[id^="droppable-"][data-index]').forEach(node=>node.replaceWith(' [blank:'+node.getAttribute('data-index')+'] '));
-    copy.querySelectorAll('.dnd-options-draggable,.dnd-options-draggable-overlay,.dnd-overlay').forEach(node=>node.remove());
+    copy.querySelectorAll(weaverSelector('.dnd-droppable[id^="droppable-"][data-index]')).forEach(node=>node.replaceWith(' [blank:'+node.getAttribute('data-index')+'] '));
+    copy.querySelectorAll(weaverSelector('.dnd-options-draggable,.dnd-options-draggable-overlay,.dnd-overlay')).forEach(node=>node.remove());
     copy.querySelectorAll('[data-testid^="fill-blank-dd-"]').forEach(node=>node.replaceWith(' [blank:'+node.getAttribute('data-testid').slice(14)+'] '));
     copy.querySelectorAll('[data-testid="draggableChoice"],[data-testid="choice-item-dd"],[data-testid="general-answer-feedback"],[data-testid="answerFeedback"],[data-testid="answer-feedback"],[data-testid="correct-answer-feedback"],[data-alef-feedback],[data-testid="wrong-answer-feedback"],[data-testid$="question-feedback-container"],[data-testid="custom-feedback-container"],[role="status"],[role="alert"]').forEach(node=>node.remove());
     copy.querySelectorAll('button,input,textarea,[data-alef-option],[data-testid="choice-item"],[role="radio"],[role="checkbox"],label,[data-testid="matching-choices"],[data-testid="matching-answers"],[data-testid^="matching-choice-"],[data-testid^="matching-answer-"],[data-alef-item],[data-alef-target],[role="listbox"],[class*="react-select"],[hidden],[aria-hidden="true"],script,style').forEach(node=>node.remove());
@@ -847,10 +858,10 @@
     return /^(?:select the correct answers?|choose the correct answers?|select all that apply|choose all correct answers|select one answer|answer the question|write your answer|enter your answer|complete the answer|اختر الاجابة الصحيحة|اختر الاجابات الصحيحة|حدد الاجابة الصحيحة|اختر الاجابة المناسبة|اختر الاجابة|اكمل الاجابة|اكتب الاجابة|اكتب اجابتك|اجب عن السؤال|اختر من القائمة)$/.test(norm(value));
   }
   function matchingControls(container) {
-    if(container.matches('.dnd-container.question-widget')){
-      if(container.matches('.text-on-image,.image-on-image,.sequence-image,.sequence-text'))throw new Error('هذا السحب يعتمد على صورة أو ترتيب خاص؛ لم يُربط تلقائيًا.');
-      const blanks=all('.dnd-droppable[id^="droppable-"][data-index]',container);
-      const choices=all('.dnd-options-draggable',container);
+    if(container.matches(weaverSelector('.dnd-container.question-widget'))){
+      if(container.matches(weaverSelector('.text-on-image,.image-on-image,.sequence-image,.sequence-text')))throw new Error('هذا السحب يعتمد على صورة أو ترتيب خاص؛ لم يُربط تلقائيًا.');
+      const blanks=all(weaverSelector('.dnd-droppable[id^="droppable-"][data-index]'),container);
+      const choices=all(weaverSelector('.dnd-options-draggable'),container);
       if(!blanks.length)return null;
       const key=location.href+'|'+text(first('[data-testid="progress-bar-slide-count"]'))+'|'+promptText(container);
       if(weaverDragCache?.key!==key){
@@ -1027,7 +1038,7 @@
       menus=ids.map(id=>root.getElementById?.(id)).filter(node=>node&&visible(node));
       if(!menus.length)return [];
     }else{
-      const wrapper=control.closest('[data-testid="selectableChoice"],.dropdown-input-field-container,[class*="__control"]')||control.parentElement;
+      const wrapper=control.closest(weaverSelector('[data-testid="selectableChoice"],.dropdown-input-field-container,[class*="__control"]'))||control.parentElement;
       const inside=[...wrapper.querySelectorAll('[role="listbox"]')].filter(visible);
       if(inside.length>1)throw new Error('ظهرت قوائم متعددة لحقل الإجابة.');
       if(inside.length)menus=inside;
@@ -1042,7 +1053,7 @@
     if(menus.length>1)throw new Error('تعذّر تحديد قائمة الإجابة الحالية.');
     // K4 adds a Cancel action to the menu with role=option, but its handler
     // explicitly ignores it as an answer. Keep that action out of the solver.
-    const options=menus.flatMap(menu=>[...menu.querySelectorAll(DROPDOWN_OPTIONS)]).filter(node=>visible(node)&&!disabled(node)&&!node.matches('.dropdown-item-cancel'));
+    const options=menus.flatMap(menu=>[...menu.querySelectorAll(DROPDOWN_OPTIONS)]).filter(node=>visible(node)&&!disabled(node)&&!node.matches(weaverSelector('.dropdown-item-cancel')));
     // A busy menu may expose an incomplete first batch of answers.
     return menus.some(menu=>menu.matches('[aria-busy="true"]'))?[]:options;
   }
@@ -1077,10 +1088,10 @@
   }
   function dropdownSelected(control,desired){
     if(control.getAttribute('aria-expanded')==='true')return false;
-    const wrapper=control.closest('[data-testid="selectableChoice"],.dropdown-input-field-container,[class*="__control"]')||control.parentElement;
+    const wrapper=control.closest(weaverSelector('[data-testid="selectableChoice"],.dropdown-input-field-container,[class*="__control"]'))||control.parentElement;
     // Weaver's authored label sits inside React Select's __single-value.
     // Those are two nested nodes for one chosen answer, not two selections.
-    const authored=[...wrapper.querySelectorAll('.dropdown-single-value-content')].filter(visible);
+    const authored=[...wrapper.querySelectorAll(weaverSelector('.dropdown-single-value-content'))].filter(visible);
     if(authored.length)return authored.length===1&&text(authored[0])===desired;
     const displays=[...wrapper.querySelectorAll('[class*="__single-value"]')].filter(node=>visible(node)&&!node.querySelector('[class*="__single-value"]'));
     if(displays.length)return displays.length===1&&text(displays[0])===desired;
@@ -1120,13 +1131,13 @@
     if(!blank)return false;
     // Read the authored answer itself. The blank may also contain an editor
     // label or validation icon; a substring match confuses ماء with ماء مالح.
-    const placed=all('.selected-option',blank).filter(node=>!node.querySelector('.selected-option'));
+    const placed=all(weaverSelector('.selected-option'),blank).filter(node=>!node.querySelector(weaverSelector('.selected-option')));
     if(placed.length)return placed.length===1&&clean(text(placed[0]))===expected;
     const copy=blank.cloneNode(true);
-    copy.querySelectorAll('.dnd-droppable__edit-label-tab,.dnd-grip-icon,.validationIcon,button,[role="button"],[aria-hidden="true"]').forEach(node=>node.remove());
+    copy.querySelectorAll(weaverSelector('.dnd-droppable__edit-label-tab,.dnd-grip-icon,.validationIcon,button,[role="button"],[aria-hidden="true"]')).forEach(node=>node.remove());
     return clean(text(copy))===expected;
   }
-  function weaverBlankHasWord(blank,expected){return !!blank?.classList.contains('is-selected')&&blankHasWord(blank,expected);}
+  function weaverBlankHasWord(blank,expected){return hasWeaverClass(blank,'is-selected')&&blankHasWord(blank,expected);}
   function weaverDragPoint(node){
     if(!visible(node))throw new Error('موضع السحب لم يعد ظاهرًا في السؤال الحالي.');
     const rect=node.getBoundingClientRect();
@@ -1146,7 +1157,7 @@
         click(item.node.firstElementChild||item.node);await delay(60);assertNotCancelled();
         current=matchingControls(questionContainer());target=current.targets.find(row=>row.id===pair.targetId);click(target.node.firstElementChild||target.node);await delay(60);
         current=matchingControls(questionContainer());
-        await waitAcknowledged(question,()=>{const active=matchingControls(questionContainer());return !!active?.items.find(row=>row.id===pair.itemId)?.node.classList.contains('selected')&&!!active?.targets.find(row=>row.id===pair.targetId)?.node.classList.contains('selected');},'لم يؤكد الموقع تثبيت زوج المطابقة.');
+        await waitAcknowledged(question,()=>{const active=matchingControls(questionContainer());return hasWeaverClass(active?.items.find(row=>row.id===pair.itemId)?.node,'selected')&&hasWeaverClass(active?.targets.find(row=>row.id===pair.targetId)?.node,'selected');},'لم يؤكد الموقع تثبيت زوج المطابقة.');
       }else if(current.mode==='blank-choice'){
         if(!target.node)throw new Error('خيار المطابقة لم يعد متاحًا.');
         click(target.node);await delay(60);assertNotCancelled();
@@ -1166,7 +1177,7 @@
           // Keep the primary button held until the actual MouseSensor activates.
           // Some lessons activate in 100 ms; others require about a second.
           target.node.dispatchEvent(mouse('mousedown',start,1));
-          await waitAcknowledged(question,()=>{const active=matchingControls(questionContainer()).targets.find(row=>row.id===pair.targetId)?.node;return !!active&&(active.classList.contains('is-dragging')||active.classList.contains('is-item-dragging')||active.getAttribute('aria-pressed')==='true');},'لم يبدأ الموقع سحب الكلمة.');
+          await waitAcknowledged(question,()=>{const active=matchingControls(questionContainer()).targets.find(row=>row.id===pair.targetId)?.node;return !!active&&(hasWeaverClass(active,'is-dragging')||hasWeaverClass(active,'is-item-dragging')||active.getAttribute('aria-pressed')==='true');},'لم يبدأ الموقع سحب الكلمة.');
           const moveToBlank=()=>{
             const blank=matchingControls(questionContainer())?.items.find(row=>row.id===pair.itemId)?.node;
             if(!blank)throw new Error('فراغ الإجابة لم يعد متاحًا.');
@@ -1176,11 +1187,11 @@
             // Scrolling can keep the same viewport coordinates while moving
             // the underlying blank. Re-dispatch until that blank acknowledges
             // hover, including after a layout change caused by the first move.
-            if(moved||!blank.classList.contains('is-about-to-drop')){end=point;doc.dispatchEvent(mouse('mousemove',end,1));}
+            if(moved||!hasWeaverClass(blank,'is-about-to-drop')){end=point;doc.dispatchEvent(mouse('mousemove',end,1));}
             return {blank,moved};
           };
           moveToBlank();
-          await waitAcknowledged(question,()=>{const {blank,moved}=moveToBlank();return !moved&&blank.classList.contains('is-about-to-drop');},'لم يؤكد الموقع موضع إسقاط الكلمة.');
+          await waitAcknowledged(question,()=>{const {blank,moved}=moveToBlank();return !moved&&hasWeaverClass(blank,'is-about-to-drop');},'لم يؤكد الموقع موضع إسقاط الكلمة.');
           assertNotCancelled();assertQuestion(question);
           doc.dispatchEvent(mouse('mouseup',end,0));released=true;lastMouseReleaseAt=performance.now();
           await waitAcknowledged(question,()=>weaverBlankHasWord(matchingControls(questionContainer())?.items.find(row=>row.id===pair.itemId)?.node,target.text),'لم يؤكد الموقع وضع الكلمة في الفراغ.');
@@ -1199,7 +1210,7 @@
       return answer.matches.every(pair=>{
         const item=active?.items.find(row=>row.id===pair.itemId)?.node,target=active?.targets.find(row=>row.id===pair.targetId)?.node;
         if(wordAcknowledged)return wordAcknowledged(item,original.targets.find(row=>row.id===pair.targetId).text);
-        if(original.mode==='click-pairs')return !!item?.classList.contains('selected')&&!!target?.classList.contains('selected');
+        if(original.mode==='click-pairs')return hasWeaverClass(item,'selected')&&hasWeaverClass(target,'selected');
         return !!target&&(target.getAttribute('data-selected-item')===pair.itemId||!!item&&target.contains(item));
       });
     };
@@ -1319,7 +1330,7 @@
       'dropdown-container','question-widget','dropdown-item','dropdown-item-cancel','dropdown-single-value',
       'dropdown-single-value-content','is-selected','is-focused','is-correct','is-incorrect','is-inline','rtl','k4',
       'dnd-container','dnd-droppable','dnd-options-draggable','is-dragging','is-about-to-drop','open-ended-container','fib-container']);
-    const classes=node=>[...new Set([...node.classList].flatMap(value=>knownClasses.has(value)?[value]:
+    const classes=node=>[...new Set([...node.classList].flatMap(value=>knownClasses.has(value.startsWith('lib-')?value.slice(4):value)?[value]:
       /__(?:control|menu|menu-list|option|input|single-value|indicators)$/.test(value)?[value.slice(value.lastIndexOf('__'))]:
         /^css-/.test(value)?['generated-css']:[]))].slice(0,8);
     const roles=new Set(['combobox','listbox','option','textbox','radio','checkbox','button','group','radiogroup','selectgroup']);
@@ -1340,16 +1351,16 @@
     const menuNodes=new Set(menuOwners.keys());
     for(const root of new Set(controls.map(node=>node.getRootNode())))for(const menu of root.querySelectorAll('[role="listbox"],[class*="__menu-list"]'))if(visible(menu)&&menuNodes.size<30)menuNodes.add(menu);
     const menus=[...menuNodes].slice(0,30).map(node=>({...describe(node),ownerFields:menuOwners.get(node)||[],busy:node.getAttribute('aria-busy')==='true',
-      semanticOptions:all('[role="option"]',node).length,weaverOptions:all('.dropdown-item:not(.dropdown-item-cancel)',node).length,
-      cancelOptions:all('.dropdown-item-cancel',node).length}));
+      semanticOptions:all('[role="option"]',node).length,weaverOptions:all(weaverSelector('.dropdown-item:not(.dropdown-item-cancel)'),node).length,
+      cancelOptions:all(weaverSelector('.dropdown-item-cancel'),node).length}));
     const textFields=all('input:not([type="hidden"]),textarea,[contenteditable="true"],math-field',container)
       .filter(node=>!node.matches('[role="combobox"],input[type="radio"],input[type="checkbox"]')).slice(0,20)
       .map(node=>({...describe(node),type:node.tagName==='INPUT'&&['text','number','search','email','password','tel','url'].includes(node.type)?node.type:null,
         disabled:disabled(node),readOnly:node.readOnly===true,contentEditable:node.getAttribute('contenteditable')==='true',
         valid:node.validity?.valid??null}));
     return {questionVisible:true,questionType:snapshot.question?.type||null,dropdowns,textFields,menus,
-      drag:{sources:all('.dnd-options-draggable,[data-alef-item],[data-testid="draggableChoice"]',container).length,
-        targets:all('.dnd-droppable,[data-alef-target],[data-testid^="fill-blank-dd-"]',container).length}};
+      drag:{sources:all(weaverSelector('.dnd-options-draggable,[data-alef-item],[data-testid="draggableChoice"]'),container).length,
+        targets:all(weaverSelector('.dnd-droppable,[data-alef-target],[data-testid^="fill-blank-dd-"]'),container).length}};
   }
   function diagnostics(){
     const started=performance.now();
@@ -1369,7 +1380,7 @@
       appRoots:[...document.querySelectorAll('#root,#app,app-root,[data-reactroot],main')].slice(0,8).map(node=>({
         tag:node.tagName,kind:node.matches('#root')?'root':node.matches('#app')?'app':node.matches('main')?'main':'app-root',
         children:node.childElementCount,visible:visible(node)}))};
-    return {ok:true,diagnostics:{version:'0.5.8',page:{url:cleanUrl(location.href)},stage:snapshot.stage,rendering,
+    return {ok:true,diagnostics:{version:'0.5.9',page:{url:cleanUrl(location.href)},stage:snapshot.stage,rendering,
       subjects:snapshot.subjects,lessons:snapshot.lessons.map(({href,...lesson})=>({...lesson,href:href?cleanUrl(href):undefined})),
       navigation:snapshot.navigation,issues:snapshot.diagnostics,frames:snapshot.frames,loading:snapshot.loading,
       ...(snapshot.questionEvidence?{questionEvidence:snapshot.questionEvidence}:{}),

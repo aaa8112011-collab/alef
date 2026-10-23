@@ -8,6 +8,8 @@ import Select,{components} from 'react-select';
 // React Select itself supplies the surrounding __single-value element and
 // keyboard/focus/portal state. No third-party implementation is vendored here.
 const settings=window.__reactSelectSettings;
+// The published Weaver m()/w() helper prefixes every CSS token with lib-.
+const w=value=>settings.legacyClasses?value:value.split(/\s+/).filter(Boolean).map(token=>token.startsWith('lib-')?token:'lib-'+token).join(' ');
 const ar=settings.language==='ar';
 const option=(id,text)=>({id,content:{text,type:'text'}});
 const labels=settings.numeric?['2','12']:['70°','65°'];
@@ -19,24 +21,24 @@ if(settings.k4)domains[0].push(option(3,'Cancel'));
 function Option({data:{content,id},innerProps,isSelected,isFocused}){
   return <div {...innerProps} id={'dropdown-option-'+id} role="option"
     aria-selected={isSelected} aria-label={content.text}
-    className={'dropdown-item '+(id===-1?'dropdown-item-cancel ':'')+
-      (isSelected?'is-selected dropdown-item-selected ':'')+(isFocused?'is-focused':'')}>
+    className={w('dropdown-item '+(id===-1?'dropdown-item-cancel ':'')+
+      (isSelected?'is-selected dropdown-item-selected ':'')+(isFocused?'is-focused':''))}>
     <div id={'dropdown-'+id}>{content.text}</div>
   </div>;
 }
 function SingleValue(props){
   const label=settings.wrongLabel?'12':props.data.content.text;
-  return <components.SingleValue {...props} className="dropdown-single-value">
-    <div className="dropdown-single-value-content">{label}</div>
-    {settings.duplicateLabels&&<div className="dropdown-single-value-content">{label}</div>}
+  return <components.SingleValue {...props} className={w("dropdown-single-value")}>
+    <div className={w("dropdown-single-value-content")}>{label}</div>
+    {settings.duplicateLabels&&<div className={w("dropdown-single-value-content")}>{label}</div>}
   </components.SingleValue>;
 }
-function Indicator(props){return <div {...props.innerProps} className="Select__indicators">▼</div>;}
+function Indicator(props){return <div {...props.innerProps} className={w("Select__indicators")}>▼</div>;}
 function Field({index,answer,onChange}){
   const options=settings.k4?[...domains[index],option(-1,ar?'إلغاء':'Cancel')]:domains[index];
-  return <div className={'dropdown-input-field-container is-inline '+(answer?'is-selected':'')}
+  return <div className={w('dropdown-input-field-container is-inline '+(answer?'is-selected':''))}
     data-index={index} data-testid={'dropdown-'+index} style={{display:'inline-block',width:180}}>
-    <Select className="dropdown-field-wrapper dropdown-input-field-wrapper" classNamePrefix="default Select"
+    <Select className={w("dropdown-field-wrapper dropdown-input-field-wrapper")} classNamePrefix={w("default Select")}
       placeholder={ar?'اختر...':'Select...'} isSearchable={false} menuPlacement="auto"
       menuPortalTarget={document.body} tabIndex={0} aria-label={ar?'اختر إجابة':'Select an option'}
       openMenuOnFocus={true} options={options} value={answer}
@@ -63,10 +65,11 @@ function App(){
     window.__realSelect.changes.push({field:index,id:answer.id,text:answer.content.text});
     setAnswers(previous=>previous.map((value,position)=>position===index?answer:value));
   }}/>;
-  return <main><div data-testid="ncle-activity-page-player">
-    <section className="dropdown-container question-widget" data-alef-question="actual-select-question">
+  return <main id="player-container"><div data-testid="ncle-activity-page-player">
+    {settings.persistentProgress!==false&&<div role="progressbar" aria-valuenow="2" aria-valuemax="5" style={{width:500,height:8,background:'#abd'}}>2/5</div>}
+    <section className={w("dropdown-container question-widget")}>
       <h3>{ar?'اختر الإجابة الصحيحة من القائمة.':'Choose the correct option from the drop-down list.'}</h3>
-      <div className="dropdown-sentence-container">{ar?'في الشكل، قياس الزاوية د هو ':'In the given figure, the measure of angle D is '}
+      <div className={w("dropdown-sentence-container")}>{ar?'في الشكل، قياس الزاوية د هو ':'In the given figure, the measure of angle D is '}
         {field(0)}{count===2&&<>{ar?' والمثلثان ':' and the triangles '}{field(1)}</>}.
       </div>
       <canvas ref={canvas} width="240" height="160" aria-label="A triangle with angle labels"/>

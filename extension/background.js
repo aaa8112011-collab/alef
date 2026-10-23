@@ -201,7 +201,9 @@ async function connect(tabId,selectors) {
 async function inspect(tabId,config,origin,signal) {
   const top=await pageMessage(tabId,{type:'ALEF_INSPECT',selectors:config.selectors},origin,signal,0);
   const routes=routeState(tabId);
-  if(top.question||top.completed||['lessons','subjects'].includes(top.stage)||!chrome.webNavigation?.getAllFrames) {
+  // Inline dropdowns already belong to this document even before their menus
+  // are inspected. Do not replace that preparation step with a loading child.
+  if(top.question||top.needsPreparation||top.completed||['lessons','subjects'].includes(top.stage)||!chrome.webNavigation?.getAllFrames) {
     routes.active=0;return top;
   }
   const initial=(top.frames||[]).filter(frame=>frame.required===true);

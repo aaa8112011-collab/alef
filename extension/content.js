@@ -1,7 +1,7 @@
 (() => {
   'use strict';
-  if (globalThis.__alefAssistantInstalled==='0.5.11') return;
-  globalThis.__alefAssistantInstalled = '0.5.11';
+  if (globalThis.__alefAssistantInstalled==='0.5.12') return;
+  globalThis.__alefAssistantInstalled = '0.5.12';
 
   let selectors = {};
   let subjects = new Map();
@@ -13,6 +13,7 @@
   let cancelled = false;
   let lastDiagnosticInteraction = null;
   const mathTargets = new Set();
+  const visualTargets = new Set();
   // A scan is synchronous and read-only. Share expensive DOM/style lookups
   // within that scan, then discard them before any click or asynchronous wait.
   let readPass = null;
@@ -670,7 +671,10 @@
         add(node,'canvas',`${node.width}x${node.height}:${hash(pixels)}`);
       } else if(!node.parentElement?.closest('svg')) {
         const box=node.getBoundingClientRect();
-        if(node.getAttribute('role')==='img'||box.width>=40&&box.height>=40)add(node,'svg',node.outerHTML);
+        if(node.getAttribute('role')==='img'||box.width>=40&&box.height>=40){
+          const copy=node.cloneNode(true);copy.removeAttribute('data-alef-visual-target');
+          add(node,'svg',copy.outerHTML);
+        }
       }
     }
     for(const node of [scope,...visualAll('*',scope)]) {
@@ -730,7 +734,7 @@
     if(!data)throw new Error('تعذّر تحويل الرسم إلى صورة قابلة للقراءة.');
     return {data,mimeType};
   }
-  async function captureVisual(entry) {
+  async function captureSourceVisual(entry) {
     const {node,kind,source}=entry,owner=view(node);
     if(kind==='unsupported')throw new Error('يحتوي السؤال على رسم لا يمكن التقاطه كاملًا؛ لم تُرسل مسألة ناقصة للحل.');
     if(kind==='canvas')return rasterize(node,node.width,node.height,owner);
@@ -765,6 +769,37 @@
       throw new Error('تعذّرت قراءة جميع صور السؤال من مصدرها. لم يُحل السؤال كنص ناقص أو تُرسل إجابة تخمينية.');
     }
   }
+  function clearVisualTargets(){
+    for(const node of visualTargets)node.removeAttribute('data-alef-visual-target');
+    visualTargets.clear();
+  }
+  async function captureVisual(entry,question){
+    try{return await captureSourceVisual(entry);}catch(originalError){
+      assertNotCancelled();assertQuestion(question);
+      if(!['image','background','canvas','svg'].includes(entry.kind)||
+        entry.kind==='image'&&(!entry.node.complete||!entry.node.naturalWidth||!entry.node.naturalHeight))throw originalError;
+      const node=entry.node,target=crypto.randomUUID();
+      node.setAttribute('data-alef-visual-target',target);visualTargets.add(node);
+      const request=()=>chrome.runtime.sendMessage({type:'ALEF_CAPTURE_VISUAL',target,kind:entry.kind,source:entry.source,
+        expectedURL:node.ownerDocument.location.href});
+      try{
+        let response=await request();
+        assertNotCancelled();assertQuestion(question);
+        if(response?.code==='visual_not_fully_visible'){
+          // Scroll only the selected diagram and retry once. It must still be
+          // the same question and source; never capture a clipped illustration.
+          node.scrollIntoView({block:'center',inline:'center',behavior:'instant'});
+          await delay(80);assertNotCancelled();assertQuestion(question);
+          response=await request();assertNotCancelled();assertQuestion(question);
+        }
+        if(!response)throw originalError;
+        if(!response.ok)throw new Error(response.error||'تعذّر التقاط رسم السؤال من الإضافة. افتح تبويب ألف في الواجهة ثم أعد المحاولة.');
+        if(!['image/png','image/jpeg'].includes(response.mimeType)||typeof response.data!=='string'||
+          !response.data.length||response.data.length>1_398_104||!/^[A-Za-z0-9+/]+={0,2}$/.test(response.data))throw new Error('رد التقاط الرسم غير صالح؛ لم تُرسل صورة ناقصة.');
+        return {data:response.data,mimeType:response.mimeType};
+      }finally{node.removeAttribute('data-alef-visual-target');visualTargets.delete(node);}
+    }
+  }
   async function getVisuals(message) {
     assertNotCancelled();
     const question=readQuestion().question;
@@ -775,7 +810,7 @@
     const images=[];
     for(const entry of entries) {
       assertNotCancelled();assertQuestion(question);
-      const data=await captureVisual(entry);
+      const data=await captureVisual(entry,question);
       assertNotCancelled();assertQuestion(question);
       images.push({id:entry.id,...data,alt:entry.alt,...(entry.optionId?{optionId:entry.optionId}:{})});
     }
@@ -1446,7 +1481,7 @@
       appRoots:[...document.querySelectorAll('#root,#app,app-root,[data-reactroot],main')].slice(0,8).map(node=>({
         tag:node.tagName,kind:node.matches('#root')?'root':node.matches('#app')?'app':node.matches('main')?'main':'app-root',
         children:node.childElementCount,visible:visible(node)}))};
-    return {ok:true,diagnostics:{version:'0.5.11',page:{url:cleanUrl(location.href)},stage:snapshot.stage,rendering,
+    return {ok:true,diagnostics:{version:'0.5.12',page:{url:cleanUrl(location.href)},stage:snapshot.stage,rendering,
       subjects:snapshot.subjects,lessons:snapshot.lessons.map(({href,...lesson})=>({...lesson,href:href?cleanUrl(href):undefined})),
       navigation:snapshot.navigation,issues:snapshot.diagnostics,frames:snapshot.frames,loading:snapshot.loading,
       ...(snapshot.questionEvidence?{questionEvidence:snapshot.questionEvidence}:{}),
@@ -1471,7 +1506,7 @@
       case 'ALEF_GET_VISUALS':return getVisuals(message);
       case 'ALEF_BEGIN':cancelled=false;return {ok:true};
       case 'ALEF_PREPARE_QUESTION':assertNotCancelled();return prepareQuestion();
-      case 'ALEF_CANCEL':cancelled=true;clearMathTargets();return {ok:true};
+      case 'ALEF_CANCEL':cancelled=true;clearMathTargets();clearVisualTargets();return {ok:true};
       case 'ALEF_SELECT_SUBJECT':{
         cancelled=false;
         if(!subjects.size)discoverSubjects();const subject=subjects.get(message.subjectId);if(!subject)throw new Error('المادة المحددة لم تعد ظاهرة.');if(subject.node)click(subject.node);return {ok:true,selected:true};

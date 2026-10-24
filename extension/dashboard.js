@@ -335,9 +335,10 @@ async function targetTab() {
 async function connect(refresh = false, requestPermission = true) {
   try {
     notice('');$('connect').disabled=true;
-    // These two Alef hosts are confirmed by the lesson embeds. Other observed
-    // Alef origins need the separate, explicit lesson-content action below.
-    const granted = !requestPermission || await chrome.permissions.request({origins:['https://moe.alefed.com/*','https://content.alefed.com/*']});
+    // Lesson embeds and the public file-service configuration confirm these
+    // exact origins. Asset access lets the worker read a displayed diagram
+    // when the image host does not allow a content-script canvas read.
+    const granted = !requestPermission || await chrome.permissions.request({origins:['https://moe.alefed.com/*','https://content.alefed.com/*','https://file-delivery.alefed.com/*']});
     if(!granted) throw new Error('يلزم السماح للإضافة بقراءة صفحة ألف لربطها.');
     const tab=await targetTab();if(tabId!==tab.id)lastRunSequence=0;tabId=tab.id;
     const result=await message(refresh?'SCAN':'CONNECT',{selectors:config.selectors});

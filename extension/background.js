@@ -1,5 +1,9 @@
 'use strict';
 
+// The optional guard also keeps the isolated protocol test harness explicit:
+// real extension workers load the packaged bridge through importScripts.
+if(typeof importScripts==='function')importScripts('visual-bridge.js');
+
 // Pairing settings belong to extension pages and the worker, never content scripts.
 async function restrictLocalSettings() {
   try { await chrome.storage.local?.setAccessLevel?.({accessLevel:'TRUSTED_CONTEXTS'}); }
@@ -1231,6 +1235,11 @@ async function handle(message) {
   }
 }
 chrome.runtime.onMessage.addListener((message,sender,respond) => {
+  if(message?.type==='ALEF_CAPTURE_VISUAL'){
+    if(sender.id!==chrome.runtime.id||!sender.tab||sender.url?.startsWith(chrome.runtime.getURL(''))||typeof handleVisualCapture!=='function')return false;
+    handleVisualCapture(message,sender).then(respond,error=>respond({ok:false,error:error.message||'تعذر التقاط رسم السؤال.'}));
+    return true;
+  }
   if(message?.type==='ALEF_MATH_FIELD') {
     if(sender.id!==chrome.runtime.id||!sender.tab||sender.url?.startsWith(chrome.runtime.getURL('')))return false;
     mathFieldMessage(message,sender).then(respond,error=>respond({ok:false,error:error.message||'تعذر التفاعل مع محرر المعادلات.'}));

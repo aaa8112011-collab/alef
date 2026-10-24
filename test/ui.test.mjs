@@ -10,7 +10,7 @@ const root = new URL('../',import.meta.url);
 // Explicit UI-only Chrome API stub. Native unpacked MV3 loading is blocked by
 // this cloud image's managed ExtensionInstallBlocklist; this harness does not
 // change that policy or claim to exercise Chrome's native permission prompt.
-async function dashboardHarness({connected=false,savedConfig=null,savedToken,sessionToken='ui-test-pairing-token-not-a-real-secret',failTokenWrites=false,initialEventRace=false,initialTerminalRace=false}={}) {
+async function dashboardHarness({connected=false,savedConfig=null,savedToken,sessionToken='ui-test-pairing-token-not-a-real-secret',failTokenWrites=false,initialEventRace=false,initialTerminalRace=false,grantedOrigins=null}={}) {
   const resources = new Map(await Promise.all(['dashboard.html','dashboard.css','dashboard.js'].map(async name=>[name,await readFile(new URL(`extension/${name}`,root))])));
   const server=createServer((request,response)=>{
     const name=new URL(request.url,'http://127.0.0.1').pathname.slice(1);
@@ -37,13 +37,13 @@ async function dashboardHarness({connected=false,savedConfig=null,savedToken,ses
       Object.assign(stores[area],structuredClone(value));
     });
     await context.exposeFunction('__removeUIStorage',(area,key)=>{delete stores[area][key];});
-    await context.addInitScript(({connected,initialEventRace,initialTerminalRace})=>{
+    await context.addInitScript(({connected,initialEventRace,initialTerminalRace,grantedOrigins})=>{
       const state={running:false,status:'idle',page:connected?{title:'صفحة اختبار محلية — الرياضيات',url:'http://127.0.0.1/fixture'}:null,
         subjects:connected?[{id:'math',name:'الرياضيات'},{id:'science',name:'العلوم'},{id:'arabic',name:'اللغة العربية'}]:[],
         subjectId:null,stats:{solved:0,review:0,total:0},events:[],lastEvent:null};
       const listeners=[];
       const local={},session={};
-      globalThis.__uiTest={state,local,session,messages:[],permissions:[],listeners,storageAccess:[],
+      globalThis.__uiTest={state,local,session,messages:[],permissions:[],permissionChecks:[],listeners,storageAccess:[],
         emit(event){listeners.forEach(listener=>listener({type:'RUN_EVENT',tabId:1,event}));}};
       const storage=(area,store)=>({
         async get(keys){const result=await __readUIStorage(area,keys);Object.assign(store,result);return result;},
@@ -81,10 +81,11 @@ async function dashboardHarness({connected=false,savedConfig=null,savedToken,ses
           return {ok:true,page:state.page,subjects:state.subjects,state:structuredClone(state)};
         }},
         storage:{local:storage('local',local),session:storage('session',session)},
-        permissions:{async request(value){globalThis.__uiTest.permissions.push(value);return true;}},
+        permissions:{async request(value){globalThis.__uiTest.permissions.push(value);return true;},
+          ...(Array.isArray(grantedOrigins)?{async contains(value){__uiTest.permissionChecks.push(value);return value.origins.every(origin=>grantedOrigins.includes(origin));}}:{})},
         tabs:{async get(){return {id:1,url:'https://moe.alefed.com/'};},async query(){return [{id:1,url:'https://moe.alefed.com/'}];},async create(){return {id:1};}},
       };
-    },{connected,initialEventRace,initialTerminalRace});
+    },{connected,initialEventRace,initialTerminalRace,grantedOrigins});
     const openPage=async()=>{
       const page=await context.newPage();page.setDefaultTimeout(7000);
       page.on('pageerror',error=>errors.push(error.message));
@@ -185,11 +186,27 @@ test('dashboard subject choice, start/stop, event rendering and permission reque
     await page.waitForFunction(()=>__uiTest.messages.some(message=>message.type==='STOP'));
     assert.equal(await page.locator('#stop').isDisabled(),true);
     assert.equal(await page.locator('#start').isEnabled(),true);
+    assert.deepEqual(await page.evaluate(()=>__uiTest.permissions),[],'Origin access is requested only after the explicit connect click');
     await page.locator('#connect').click();
     await page.waitForFunction(()=>__uiTest.permissions.length===1);
-    assert.deepEqual(await page.evaluate(()=>__uiTest.permissions[0]),{origins:['https://moe.alefed.com/*','https://content.alefed.com/*']});
+    assert.deepEqual(await page.evaluate(()=>__uiTest.permissions[0]),{origins:['https://moe.alefed.com/*','https://content.alefed.com/*','https://file-delivery.alefed.com/*']});
     assert.deepEqual(harness.errors,[]);
   }finally{await harness.close();}
+});
+
+test('automatic reconnect keeps ordinary subjects usable without image-host access and never requests it outside a click',async()=>{
+  const h=await dashboardHarness({connected:true,grantedOrigins:['https://moe.alefed.com/*','https://content.alefed.com/*']});
+  try{
+    const {page}=h;
+    await page.waitForFunction(()=>__uiTest.messages.some(message=>message.type==='CONNECT'));
+    assert.deepEqual(await page.evaluate(()=>__uiTest.permissionChecks),[{origins:['https://moe.alefed.com/*']}]);
+    assert.deepEqual(await page.evaluate(()=>__uiTest.permissions),[],'Reopening must not trigger an asset permission prompt');
+    assert.equal(await page.locator('#subjects button').count(),3);
+    await page.locator('#subjects button').first().click();await page.locator('#start').click();
+    await page.waitForFunction(()=>__uiTest.messages.some(message=>message.type==='START'));
+    assert.deepEqual(await page.evaluate(()=>__uiTest.permissions),[],'An ordinary run does not implicitly request image-host access');
+    assert.deepEqual(h.errors,[]);
+  }finally{await h.close();}
 });
 
 test('a late START response never overwrites an already received terminal event or erases its reason',async()=>{

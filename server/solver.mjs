@@ -275,6 +275,10 @@ const accuracyInstruction = `\nAccuracy is more important than speed. Read the e
 
 const latexInstruction = `\nThis text question uses a MathLive math editor (answerFormat: latex). Put ONLY the requested mathematical expression in the JSON text field, using valid LaTeX, with no prose, Markdown, code fences, or surrounding math delimiters. Keep the Arabic explanation in explanation only. Preserve the exact mathematical form requested by the question. Prefer an exact fraction in LaTeX when a fraction or ratio is required; do not replace it with an equivalent decimal merely because they have the same numerical value. Do not include units or an equation unless the question requests them. Check signs, parentheses, exponents, variable case, and the direction of any ratio independently. The platform can compare literal mathematical form, so numerical equivalence alone does not justify changing the requested form.`;
 
+const textAnswerInstruction = `\nThis text question fills a single ordinary text or numeric input. Return optionIds exactly as [] and put the complete nonempty answer STRING in text. Never put the answer in optionIds, selections, or explanation instead of text. For a mathematical value, text contains only the requested value or expression, without Markdown, prose, or a variable label already printed beside the input. Include units or an equation only when explicitly requested inside the answer. Preserve the requested fraction, decimal, signs and variable case. For a written-language answer, put the requested words in text. Keep the short Arabic explanation in explanation only.`;
+
+const textFormatRepairInstruction = `\nCorrect only the response format for this original text question. The previous response did not provide a valid text answer. Read the original question and attached images again; return exactly the requested JSON with optionIds: [] and a nonempty answer STRING in text. Do not copy a choice ID, a dropdown selection, or an explanation into the answer. Keep your actual confidence. Missing evidence must not be invented.`;
+
 const uncertainInstruction = `\nThe user explicitly enabled answering despite uncertainty for this request. Uncertainty alone must not cause abstention: return your best-supported complete candidate answer even when your confidence is below 0.85. For choices, select the best-supported original option ID or IDs; for matching or dropdowns, return a complete mapping using the original IDs and each field's own options; for text, provide the best-supported requested answer. This overrides the conservative abstention rule above only when the available evidence supports a candidate but you are uncertain. Keep your actual confidence unchanged and explain uncertainty briefly in Arabic; never claim that an uncertain answer is verified or raise confidence to pass a threshold. Missing essential question text or images, nonexistent IDs and malformed or incomplete mappings remain invalid: do not invent them. Preserve all requested answer-format rules.`;
 
 const visionCapabilities = new WeakMap();
@@ -361,8 +365,11 @@ function localAnswerSchema(question) {
     optionIds:{type:'array',items:{type:'string',...(choices?{enum:optionIds}:{})},
       // Keep abstention possible. Empty choices stay in the review path instead
       // of coercing the model into choosing a visible answer.
-      minItems:0,maxItems:question.type==='single'?1:choices?optionIds.length:0},
-    text:{type:'string',...(question.type==='dropdowns'?{enum:['']}:{})},
+      minItems:0,maxItems:question.type==='single'?1:choices?optionIds.length:0,
+      // An exact empty-array constant also constrains older local grammars
+      // whose array repetition handling did not enforce maxItems: 0.
+      ...(!choices?{enum:[[]]}:{})},
+    text:{type:'string',...(question.type==='text'?{minLength:1}:question.type==='dropdowns'?{enum:['']}:{})},
     explanation:{type:'string'},
     confidence:{type:'number',minimum:0,maximum:1},
   };
@@ -386,7 +393,8 @@ function localAnswerSchema(question) {
   return {type:'object',properties,required:Object.keys(properties),additionalProperties:false};
 }
 
-async function requestAnswer(input, config, signal, secondPass) {
+async function requestAnswer(input, config, signal, secondPass, repairTextFormat=false) {
+  if(signal.aborted)throw new SolverError('request_aborted', 'أُلغي الطلب أو انتهت مهلة الاتصال.', 504);
   const isLocal = (config.provider ?? 'ollama') === 'ollama';
   const images = input.question.images || [];
   const hasImages = images.length > 0;
@@ -395,7 +403,7 @@ async function requestAnswer(input, config, signal, secondPass) {
   const model = isLocal && hasImages ? config.visionModel || 'qwen3-vl:8b' : config.model;
   const thinking = input.qualityMode && !hasImages && /(?:^|\/)qwen3(?::|$)/i.test(model);
   const messages = [
-    { role: 'system', content: instruction + (input.qualityMode || hasImages ? accuracyInstruction : '') + (input.allowUncertain ? uncertainInstruction : '') + (input.question.answerFormat === 'latex' ? latexInstruction : '') + (secondPass ? '\nSolve independently from the original evidence. Recompute without assuming the first solution; read every relevant image and double-check your reasoning before giving the JSON answer.' : '') },
+    { role: 'system', content: instruction + (input.qualityMode || hasImages ? accuracyInstruction : '') + (input.allowUncertain ? uncertainInstruction : '') + (input.question.type==='text' ? input.question.answerFormat === 'latex' ? latexInstruction : textAnswerInstruction : '') + (repairTextFormat ? textFormatRepairInstruction : '') + (secondPass ? '\nSolve independently from the original evidence. Recompute without assuming the first solution; read every relevant image and double-check your reasoning before giving the JSON answer.' : '') },
     { role:'user', content:!isLocal && hasImages ? [{type:'text',text}, ...images.map(data=>({type:'image_url',image_url:{url:`data:${imageMime(data)};base64,${data}`,detail:'high'}}))] : text,
       ...(isLocal && hasImages ? {images} : {}) },
   ];
@@ -447,9 +455,20 @@ async function requestAnswer(input, config, signal, secondPass) {
     if ((isLocal && body?.done_reason === 'length') || (!isLocal && body?.choices?.[0]?.finish_reason === 'length')) {
       throw new SolverError('incomplete_provider_response', 'انتهى حد خرج النموذج قبل اكتمال الإجابة؛ لم تُرسل إجابة مبتورة.');
     }
-    const content = isLocal ? body?.message?.content : body?.choices?.[0]?.message?.content;
-    if (typeof content !== 'string') throw new Error('missing content');
-    return normalizeAnswer(JSON.parse(content), input.question);
+    try{
+      const content = isLocal ? body?.message?.content : body?.choices?.[0]?.message?.content;
+      if (typeof content !== 'string') throw new Error('missing content');
+      return normalizeAnswer(JSON.parse(content), input.question);
+    }catch(error){
+      if(signal.aborted)throw new SolverError('request_aborted', 'أُلغي الطلب أو انتهت مهلة الاتصال.', 504);
+      if(error instanceof SolverError&&error.code!=='invalid_provider_response')throw error;
+      const invalid=error instanceof SolverError?error:new SolverError('invalid_provider_response', 'أعاد مزود الذكاء الاصطناعي إجابة بتنسيق غير صالح.');
+      // Only answer content inside a successfully read provider envelope is
+      // repairable. Broken streams, oversized bodies and HTTP/model failures
+      // must not masquerade as a request to correct an answer's JSON shape.
+      invalid.textFormatRepairable=true;
+      throw invalid;
+    }
   } catch (error) {
     if (error instanceof SolverError) throw error;
     if (signal.aborted) throw new SolverError('request_aborted', 'أُلغي الطلب أو انتهت مهلة الاتصال.', 504);
@@ -474,6 +493,24 @@ function answersAgree(first, second, question) {
   return [...first.optionIds].sort().join('\u0000') === [...second.optionIds].sort().join('\u0000');
 }
 
+async function requestPassAnswer(input,config,signal,secondPass,repairBudget){
+  const read=async repair=>{
+    try{return await requestAnswer(input,config,signal,secondPass,repair);}
+    catch(error){
+      // Retry only a malformed text answer. Network, model, cancellation and
+      // truncation errors retain their original handling and total deadline.
+      if(input.question.type==='text'&&error.code==='invalid_provider_response'&&error.textFormatRepairable===true)return null;
+      throw error;
+    }
+  };
+  const answer=await read(false);
+  if(answer||input.question.type!=='text'||repairBudget.used)return answer;
+  repairBudget.used=true;
+  // One correction for the entire solve, including verification. It gets the
+  // original evidence, never an untrusted previous response or inferred value.
+  return read(true);
+}
+
 export async function solveQuestion(rawInput, config, parentSignal) {
   const input = validateSolveInput(rawInput);
   if (parentSignal?.aborted) throw new SolverError('request_aborted', 'أُلغي الطلب أو انتهت مهلة الاتصال.', 504);
@@ -494,17 +531,19 @@ export async function solveQuestion(rawInput, config, parentSignal) {
   const timeout = AbortSignal.timeout(config.requestTimeoutMs ?? (config.provider === 'openai' ? 60_000 : 240_000));
   const signal = parentSignal ? AbortSignal.any([timeout, parentSignal]) : timeout;
   if ((config.provider ?? 'ollama') === 'ollama' && input.question.images?.length) await checkVisionModel(config, signal);
-  const first = await requestAnswer(input, config, signal, false);
+  const repairBudget={used:false};
+  const first = await requestPassAnswer(input, config, signal, false,repairBudget);
   if (!first) {
     return { answer: { optionIds: [], text: '', explanation: '', confidence: 0,
       ...(input.question.type === 'matching' ? { matches: [] } : {}),
-      ...(input.question.type === 'dropdowns' ? { selections: [] } : {}) }, verified: false, needsReview: true, reason: 'invalid_selection' };
+      ...(input.question.type === 'dropdowns' ? { selections: [] } : {}) }, verified: false, needsReview: true,
+      reason: input.question.type==='text'?'invalid_text_answer':'invalid_selection' };
   }
   if (first.confidence < MIN_CONFIDENCE) {
     return { answer: first, verified: false, needsReview: true, reason: 'low_confidence' };
   }
   if (!input.verify) return { answer: first, verified: false, needsReview: false };
-  const second = await requestAnswer(input, config, signal, true);
+  const second = await requestPassAnswer(input, config, signal, true,repairBudget);
   if (!second || !answersAgree(first, second, input.question)) {
     return { answer: first, verified: false, needsReview: true, reason: 'verification_disagreement' };
   }

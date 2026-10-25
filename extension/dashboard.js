@@ -27,7 +27,7 @@ let pendingPairingSave = Promise.resolve();
 const lessonStatuses = {pending:'بانتظار البدء',running:'جارٍ العمل',completed:'مكتمل',review:'يحتاج مراجعة',locked:'مقفل',alreadycompleted:'مكتمل سابقًا'};
 
 const statusNames = {idle:'بانتظار البدء',running:'جارٍ الحل',complete:'اكتملت الجلسة',review:'تحتاج مراجعتك',error:'تعذّر المتابعة',stopped:'متوقف',interrupted:'انقطعت الجلسة'};
-const reviewReasons = {low_confidence:'تقدير الثقة منخفض؛ راجع الإجابة.',verification_disagreement:'لم تتفق عمليتا الحل والتحقق؛ راجع السؤال.',invalid_selection:'خيارات الإجابة لا تطابق السؤال.'};
+const reviewReasons = {low_confidence:'تقدير الثقة منخفض؛ راجع الإجابة.',verification_disagreement:'لم تتفق عمليتا الحل والتحقق؛ راجع السؤال.',invalid_selection:'خيارات الإجابة لا تطابق السؤال.',invalid_text_answer:'لم يُعد النموذج قيمة نصية صالحة للحقل بعد تصحيح الصيغة.'};
 
 function notice(message, isError = false) {
   $('notice').textContent = message;

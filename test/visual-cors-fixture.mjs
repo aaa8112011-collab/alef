@@ -98,11 +98,21 @@ export async function assertCorsPng(h,image,{scale=1}={}){
 }
 
 
-export async function createCorsPipeline(t,{language='en',assetPermission=true,activeTab=true,deferAssetFetch=false,ariaHidden=false,dpr=1,kind='image'}={}){
+export async function createCorsPipeline(t,{language='en',assetPermission=true,activeTab=true,deferAssetFetch=false,ariaHidden=false,dpr=1,kind='image',autoActivateTabs=false,deferScreenshot=false}={}){
   let releaseAsset;const assetGate=new Promise(resolve=>{releaseAsset=resolve;});t.after(()=>releaseAsset());
+  let releaseScreenshot,beginScreenshot;
+  const screenshotGate=new Promise(resolve=>{releaseScreenshot=resolve;}),screenshotStarted=new Promise(resolve=>{beginScreenshot=resolve;});
+  t.after(()=>releaseScreenshot());
   const f=await createCorsQuestion(t,{language,completeOnSubmit:true,ariaHidden,dpr,kind}),{h}=f;
   const token='cors-actual-http-fixture-only',chats=[],events=[],assets=[],executions=[],pixelMethods=[],captureReplies=[];
-  let screenshotCalls=0,handler;
+  const tabUpdates=[],windowUpdates=[];
+  const activationListeners=new Set();
+  let screenshotCalls=0,handler,activeId=activeTab?1:2;
+  const otherPage=autoActivateTabs?await h.page.context().browser().newPage({viewport:h.page.viewportSize()}):null;
+  if(otherPage){
+    await otherPage.setContent('<body style="margin:0;background:#ff0022;height:100vh"><h1>Private unrelated tab</h1></body>');
+    if(activeId===1)await h.page.bringToFront();
+  }
   const app=createAppServer({provider:'ollama',model:'qwen3:8b',visionModel:'qwen3-vl:8b',pairingToken:token,
     requestTimeoutMs:10000,healthTimeoutMs:1500,fetchImpl:async(url,options={})=>{
       if(url.endsWith('/api/tags'))return Response.json({models:[{name:'qwen3:8b'},{name:'qwen3-vl:8b'}]});
@@ -118,15 +128,30 @@ export async function createCorsPipeline(t,{language='en',assetPermission=true,a
   await new Promise((resolve,reject)=>{app.once('error',reject);app.listen(0,'127.0.0.1',resolve);});
   t.after(()=>new Promise(resolve=>{app.close(resolve);app.closeAllConnections();}));
   const serverUrl=`http://127.0.0.1:${app.address().port}`,storage={};
-  const tab=()=>({id:1,windowId:4,active:activeTab,url:h.page.url()});
+  const tab=(id=1)=>id===1?{id:1,windowId:4,active:autoActivateTabs?activeId===1:activeTab,url:h.page.url()}:
+    {id,windowId:4,active:activeId===id,url:'https://unrelated.example/'};
+  const activateTab=async id=>{
+    if(activeId===id)return tab(id);
+    activeId=id;
+    if(autoActivateTabs)await (id===1?h.page:otherPage).bringToFront();
+    for(const listener of activationListeners)listener({tabId:id,windowId:4});
+    return tab(id);
+  };
   const chrome={runtime:{id:'fixture-extension',getURL:path=>'chrome-extension://fixture-extension/'+path,getPlatformInfo:async()=>({}),
       onMessage:{addListener(fn){handler=fn;}},sendMessage:async message=>events.push(structuredClone(message))},
     storage:{session:{get:async key=>({[key]:storage[key]}),set:async values=>Object.assign(storage,structuredClone(values)),remove:async key=>{delete storage[key];}}},
     permissions:{contains:async()=>assetPermission},
-    tabs:{get:async()=>tab(),query:async()=>[activeTab?tab():{id:2,windowId:4,active:true,url:'https://unrelated.example/'}],
+    tabs:{get:async id=>autoActivateTabs?tab(id):tab(),query:async()=>[autoActivateTabs?tab(activeId):activeTab?tab():{id:2,windowId:4,active:true,url:'https://unrelated.example/'}],
+      ...(autoActivateTabs?{update:async(id,options)=>{tabUpdates.push({id,options:structuredClone(options)});assertEndpoint(options.active===true,'Unexpected tab mutation');return activateTab(id);},
+        onActivated:{addListener(fn){activationListeners.add(fn);},removeListener(fn){activationListeners.delete(fn);}}}:{}),
       sendMessage:async(_id,message)=>h.send(message),onRemoved:{addListener(){}},
-      captureVisibleTab:async()=>{screenshotCalls++;return 'data:image/png;base64,'+(await h.page.screenshot()).toString('base64');}},
-    windows:{get:async()=>({id:4,type:'normal',state:'normal'})},
+      captureVisibleTab:async()=>{
+        screenshotCalls++;beginScreenshot();if(deferScreenshot)await screenshotGate;
+        const page=autoActivateTabs&&activeId!==1?otherPage:h.page;
+        return 'data:image/png;base64,'+(await page.screenshot()).toString('base64');
+      }},
+    windows:{get:async()=>({id:4,type:'normal',state:'normal'}),...(autoActivateTabs?{
+      update:async(id,options)=>{windowUpdates.push({id,options:structuredClone(options)});throw Error('Capture must not focus a browser window');}}:{})},
     webNavigation:{getAllFrames:async()=>[{frameId:0,parentFrameId:-1,url:h.page.url(),documentId:'cors-browser-document'}]},
     scripting:{executeScript:async request=>{
       executions.push({world:request.world,functionName:request.func?.name,target:structuredClone(request.target)});
@@ -163,7 +188,8 @@ export async function createCorsPipeline(t,{language='en',assetPermission=true,a
     if(message.type==='ALEF_CAPTURE_VISUAL')captureReplies.push(response);return response;
   });
   t.after(()=>send({type:'STOP'}));
-  return {...f,chats,events,assets,executions,pixelMethods,captureReplies,releaseAsset,get screenshotCalls(){return screenshotCalls;},send,async start(){
+  return {...f,chats,events,assets,executions,pixelMethods,captureReplies,releaseAsset,releaseScreenshot,screenshotStarted,
+    tabUpdates,windowUpdates,activateTab,get activeTabId(){return activeId;},get screenshotCalls(){return screenshotCalls;},send,async start(){
     const connected=await send({type:'CONNECT'});assertEndpoint(connected.ok===true,JSON.stringify(connected));
     const subject=connected.subjects.find(row=>row.id==='current');assertEndpoint(!!subject,JSON.stringify(connected));
     const started=await send({type:'START',subjectId:subject.id,config:{serverUrl,token,qualityMode:true,verify:true,autoSubmit:true,skipInstruction:true}});

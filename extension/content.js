@@ -1,7 +1,7 @@
 (() => {
   'use strict';
-  if (globalThis.__alefAssistantInstalled==='0.5.15') return;
-  globalThis.__alefAssistantInstalled = '0.5.15';
+  if (globalThis.__alefAssistantInstalled==='0.5.16') return;
+  globalThis.__alefAssistantInstalled = '0.5.16';
 
   let selectors = {};
   let subjects = new Map();
@@ -30,7 +30,8 @@
     'question-widget','question-statement-container','mcq-option-content-container','mcq-icon-container','mcq-option-icon-container',
     'dnd-grip-icon','dropdown-input-field-container','dropdown-item','dropdown-item-cancel','dropdown-single-value-content',
     'dnd-droppable','dnd-options-draggable','dnd-options-draggable-overlay','dnd-overlay','text-on-image','image-on-image',
-    'sequence-image','sequence-text','selected-option','dnd-droppable__edit-label-tab','validationIcon']);
+    'sequence-image','sequence-text','selected-option','dnd-droppable__edit-label-tab','validationIcon',
+    'fib-input-field-container','field-is-correct','option-icon','option-correct-icon','option-incorrect-icon']);
   const weaverSelector=literal=>literal.replace(/\.([a-zA-Z][\w-]*)/g,(match,name)=>
     WEAVER_CLASSES.has(name)?`:is(.${name},.lib-${name})`:match);
   const hasWeaverClass=(node,name)=>!!node&&(node.classList.contains(name)||node.classList.contains('lib-'+name));
@@ -614,7 +615,8 @@
     if(option.actual)return !!option.node.querySelector('.choice.selected,.input-placeholder.selected,.input-placeholder.selected-by-user,.choice-select.selected')||hasWeaverClass(option.node,'selected');
     return option.control.matches('input')?option.control.checked:option.control.getAttribute('aria-checked')==='true';
   }
-  const VISUAL_EXCLUSIONS=weaverSelector('.mcq-icon-container,.mcq-option-icon-container,.dnd-grip-icon,.katex,math,math-field,mjx-container,.MathJax,[data-testid$="question-feedback-container"],[data-testid="custom-feedback-container"],[data-testid="general-answer-feedback"],[data-testid="answerFeedback"],[data-testid="answer-feedback"],[data-testid="wrong-answer-feedback"],[data-testid="correct-answer-feedback"],[data-alef-feedback],[role="status"],[role="alert"],aside,nav,[role="banner"],[role="navigation"]');
+  const FIB_RESULT_ICONS=weaverSelector('.fib-input-field-container .option-icon,.fib-input-field-container .option-correct-icon,.fib-input-field-container .option-incorrect-icon');
+  const VISUAL_EXCLUSIONS=weaverSelector('.mcq-icon-container,.mcq-option-icon-container,.dnd-grip-icon,.katex,math,math-field,mjx-container,.MathJax,[data-testid$="question-feedback-container"],[data-testid="custom-feedback-container"],[data-testid="general-answer-feedback"],[data-testid="answerFeedback"],[data-testid="answer-feedback"],[data-testid="wrong-answer-feedback"],[data-testid="correct-answer-feedback"],[data-alef-feedback],[role="status"],[role="alert"],aside,nav,[role="banner"],[role="navigation"]')+','+FIB_RESULT_ICONS;
   const MAX_VISUALS=3;
   const MAX_VISUAL_BYTES=1_048_576;
   const QUESTION_ROOTS='[data-alef-question],[data-question-id],[data-testid="question-renderer"],[data-testid="new-question-renderer"],'+WEAVER_QUESTIONS;
@@ -960,7 +962,17 @@
   function feedback(container){
     const retry=all('button,[role="button"]').some(node=>!disabled(node)&&/^(try again|حاول مرة اخري|حاول مجددا)$/.test(norm(text(node))));
     const attempts=all('div[data-testid^="attempt-"]',container);const active=attempts.at(-1)||container;
-    return retry||(!button('next')&&!!first('[data-testid="wrong-answer-feedback"],[data-alef-feedback="wrong"]',active))?'wrong':null;
+    if(retry||(!button('next')&&!!first('[data-testid="wrong-answer-feedback"],[data-alef-feedback="wrong"]',active)))return 'wrong';
+    // Published FIB result icons have misleading/swapped alt labels. Trust
+    // only the current locked field's authored accepted-state class.
+    if(container.matches(weaverSelector('.fib-container.question-widget'))){
+      const fields=textAnswerControls(container);
+      if(fields.length===1&&!editableTextAnswer(fields[0])){
+        const accepted=fields[0].closest(weaverSelector('.fib-input-field-container.field-is-correct'));
+        if(accepted&&container.contains(accepted))return 'correct';
+      }
+    }
+    return null;
   }
   function readQuestion() {return withReadPass(readQuestionPage);}
   function readQuestionPage() {
@@ -1481,7 +1493,7 @@
       appRoots:[...document.querySelectorAll('#root,#app,app-root,[data-reactroot],main')].slice(0,8).map(node=>({
         tag:node.tagName,kind:node.matches('#root')?'root':node.matches('#app')?'app':node.matches('main')?'main':'app-root',
         children:node.childElementCount,visible:visible(node)}))};
-    return {ok:true,diagnostics:{version:'0.5.15',page:{url:cleanUrl(location.href)},stage:snapshot.stage,rendering,
+    return {ok:true,diagnostics:{version:'0.5.16',page:{url:cleanUrl(location.href)},stage:snapshot.stage,rendering,
       subjects:snapshot.subjects,lessons:snapshot.lessons.map(({href,...lesson})=>({...lesson,href:href?cleanUrl(href):undefined})),
       navigation:snapshot.navigation,issues:snapshot.diagnostics,frames:snapshot.frames,loading:snapshot.loading,
       ...(snapshot.questionEvidence?{questionEvidence:snapshot.questionEvidence}:{}),

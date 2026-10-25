@@ -638,8 +638,9 @@ async function afterSubmission(tabId,question,config,origin,signal) {
     assertActive(signal);
     last = await inspect(tabId,config,origin,signal);
     if (retryRequired(last))return last;
-    const ready=last.permissionRequired||blockedLessonMessage(last)||last.completed||last.stage==='complete'||last.stage==='lessons'||
-      last.question&&!sameQuestion(last,question)||last.needsPreparation;
+    const terminal=last.permissionRequired||blockedLessonMessage(last)||last.completed||last.stage==='complete'||last.stage==='lessons';
+    const accepted=last.feedback==='correct';
+    const ready=terminal||last.question&&!sameQuestion(last,question)||last.needsPreparation;
     // A question may unmount before its Next transition finishes. Do not hand
     // that busy instruction shell to runLesson, whose own click history starts
     // before submission. A new ready question or a new forward control can
@@ -647,7 +648,7 @@ async function afterSubmission(tabId,question,config,origin,signal) {
     if(lastNavigation&&!ready&&(last.loading||last.framePending)&&!newForwardAction(last,lastNavigation)) {
       await pause(250,signal);continue;
     }
-    if (ready||last.stage==='instruction') return last;
+    if(terminal||!accepted&&(ready||last.stage==='instruction'))return last;
     const action = last.navigation?.find(item=>['next','finish'].includes(item.kind));
     if (action) {
       const identity = `${transitionKey(last)}:${actionKey(action)}`;
@@ -659,7 +660,7 @@ async function afterSubmission(tabId,question,config,origin,signal) {
     }
     await pause(250,signal);
   }
-  return last ? {...last,...(lastNavigation?{navigationPending:true}:{})} : {stage:'unknown',question:null,completed:false};
+  return last ? {...last,...(lastNavigation||last.feedback==='correct'?{navigationPending:true}:{})} : {stage:'unknown',question:null,completed:false};
 }
 async function solve(question,subject,config,signal) {
   // Local models can take minutes on a CPU. Stop still aborts immediately.
@@ -894,6 +895,13 @@ async function runLesson(tabId,subject,initial,lesson,config,origin,signal,state
       await pageMessage(tabId,{type:'ALEF_PREPARE_QUESTION',selectors:config.selectors},origin,signal);
       snapshot=await inspect(tabId,config,origin,signal);
       if(snapshot.needsPreparation)return {review:true,snapshot,message:'لم تظهر خيارات القائمة المنسدلة بوضوح.'};
+      continue;
+    }
+    if(snapshot.feedback==='correct'&&snapshot.question){
+      // An accepted field can remain on screen when resuming a lesson. Its
+      // feedback is navigation state, never another request to solve it.
+      await emit(tabId,'status','قُبلت الإجابة؛ الانتقال إلى السؤال التالي…',{phase:'advancing'});
+      snapshot=await afterSubmission(tabId,snapshot.question,config,origin,signal);
       continue;
     }
     if (snapshot.stage === 'question' && snapshot.question) {

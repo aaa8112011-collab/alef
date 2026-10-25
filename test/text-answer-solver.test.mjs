@@ -164,12 +164,13 @@ test('the initial total deadline also aborts a stalled correction response body'
   }finally{clearTimeout(keepAlive);}
 });
 
-for(const [name,response,code] of [
-  ['provider error',()=>Response.json({error:'fixture provider failure'},{status:500}),'ollama_error'],
-  ['truncated output',()=>Response.json({message:{content:JSON.stringify(candidate)},done_reason:'length'}),'incomplete_provider_response'],
+for(const [name,response,code,calls] of [
+  ['provider error',()=>Response.json({error:'fixture provider failure'},{status:500}),'ollama_error',1],
+  ['repeated truncated output',()=>Response.json({message:{content:JSON.stringify(candidate)},done_reason:'length'}),'incomplete_provider_response',2],
 ])test(`${name} retains its error instead of triggering a text format correction`,async()=>{
   const f=fixture(async()=>response());
-  await assert.rejects(solveQuestion(input(),f.config),{code});assert.equal(f.requests.length,1);
+  await assert.rejects(solveQuestion(input(),f.config),{code});assert.equal(f.requests.length,calls);
+  assert.ok(f.requests.every(request=>!request.messages[0].content.includes('Correct only the response format')));
 });
 
 for(const [name,response] of [

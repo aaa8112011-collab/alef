@@ -279,6 +279,8 @@ const textAnswerInstruction = `\nThis text question fills a single ordinary text
 
 const textFormatRepairInstruction = `\nCorrect only the response format for this original text question. The previous response did not provide a valid text answer. Read the original question and attached images again; return exactly the requested JSON with optionIds: [] and a nonempty answer STRING in text. Do not copy a choice ID, a dropdown selection, or an explanation into the answer. Keep your actual confidence. Missing evidence must not be invented.`;
 
+const compactAnswerInstruction = `\nReturn a compact complete answer from the original evidence. A previous generation reached its output limit and must not be continued or copied. Output only the requested final JSON, with every required field or matching pair, using the original IDs. Keep unused text empty and the Arabic explanation to one brief sentence. Do not emit analysis, repeat the question, list rejected alternatives, or add extra mappings. Preserve your actual confidence and do not invent missing evidence.`;
+
 const uncertainInstruction = `\nThe user explicitly enabled answering despite uncertainty for this request. Uncertainty alone must not cause abstention: return your best-supported complete candidate answer even when your confidence is below 0.85. For choices, select the best-supported original option ID or IDs; for matching or dropdowns, return a complete mapping using the original IDs and each field's own options; for text, provide the best-supported requested answer. This overrides the conservative abstention rule above only when the available evidence supports a candidate but you are uncertain. Keep your actual confidence unchanged and explain uncertainty briefly in Arabic; never claim that an uncertain answer is verified or raise confidence to pass a threshold. Missing essential question text or images, nonexistent IDs and malformed or incomplete mappings remain invalid: do not invent them. Preserve all requested answer-format rules.`;
 
 const visionCapabilities = new WeakMap();
@@ -358,7 +360,7 @@ function localOutputBudget(question) {
   return Math.min(8192, Math.max(minimum, Buffer.byteLength(JSON.stringify(output)) + 256));
 }
 
-function localAnswerSchema(question) {
+function localAnswerSchema(question,compact=false) {
   const choices=['single','multiple'].includes(question.type);
   const optionIds=question.options.map(option=>option.id);
   const properties={
@@ -369,8 +371,8 @@ function localAnswerSchema(question) {
       // An exact empty-array constant also constrains older local grammars
       // whose array repetition handling did not enforce maxItems: 0.
       ...(!choices?{enum:[[]]}:{})},
-    text:{type:'string',...(question.type==='text'?{minLength:1}:question.type==='dropdowns'?{enum:['']}:{})},
-    explanation:{type:'string'},
+    text:{type:'string',...(question.type==='text'?{minLength:1}:['matching','dropdowns'].includes(question.type)?{enum:['']}:{})},
+    explanation:{type:'string',...(compact?{maxLength:240}:{})},
     confidence:{type:'number',minimum:0,maximum:1},
   };
   if(question.type==='matching') {
@@ -393,7 +395,7 @@ function localAnswerSchema(question) {
   return {type:'object',properties,required:Object.keys(properties),additionalProperties:false};
 }
 
-async function requestAnswer(input, config, signal, secondPass, repairTextFormat=false) {
+async function requestAnswer(input, config, signal, secondPass, {repairTextFormat=false,compact=false}={}) {
   if(signal.aborted)throw new SolverError('request_aborted', 'أُلغي الطلب أو انتهت مهلة الاتصال.', 504);
   const isLocal = (config.provider ?? 'ollama') === 'ollama';
   const images = input.question.images || [];
@@ -401,9 +403,9 @@ async function requestAnswer(input, config, signal, secondPass, repairTextFormat
   const {images:_images, ...question} = input.question;
   const text = JSON.stringify({subject:input.subject,question});
   const model = isLocal && hasImages ? config.visionModel || 'qwen3-vl:8b' : config.model;
-  const thinking = input.qualityMode && !hasImages && /(?:^|\/)qwen3(?::|$)/i.test(model);
+  const thinking = !compact && input.qualityMode && !hasImages && /(?:^|\/)qwen3(?::|$)/i.test(model);
   const messages = [
-    { role: 'system', content: instruction + (input.qualityMode || hasImages ? accuracyInstruction : '') + (input.allowUncertain ? uncertainInstruction : '') + (input.question.type==='text' ? input.question.answerFormat === 'latex' ? latexInstruction : textAnswerInstruction : '') + (repairTextFormat ? textFormatRepairInstruction : '') + (secondPass ? '\nSolve independently from the original evidence. Recompute without assuming the first solution; read every relevant image and double-check your reasoning before giving the JSON answer.' : '') },
+    { role: 'system', content: instruction + (input.qualityMode || hasImages ? accuracyInstruction : '') + (input.allowUncertain ? uncertainInstruction : '') + (input.question.type==='text' ? input.question.answerFormat === 'latex' ? latexInstruction : textAnswerInstruction : '') + (repairTextFormat ? textFormatRepairInstruction : '') + (compact ? compactAnswerInstruction : '') + (secondPass ? '\nSolve independently from the original evidence. Recompute without assuming the first solution; read every relevant image and double-check your reasoning before giving the JSON answer.' : '') },
     { role:'user', content:!isLocal && hasImages ? [{type:'text',text}, ...images.map(data=>({type:'image_url',image_url:{url:`data:${imageMime(data)};base64,${data}`,detail:'high'}}))] : text,
       ...(isLocal && hasImages ? {images} : {}) },
   ];
@@ -416,10 +418,12 @@ async function requestAnswer(input, config, signal, secondPass, repairTextFormat
         model,
         messages,
         stream: false,
-        format: localAnswerSchema(input.question),
+        format: localAnswerSchema(input.question,compact),
         think: thinking,
         keep_alive: '15m',
-        options: { temperature: 0, num_predict: Math.max(localOutputBudget(input.question), thinking ? 4096 : input.qualityMode || hasImages ? 2048 : 0), num_ctx: 8192 },
+        options: { temperature: 0, num_predict: compact
+          ? Math.min(8192,Math.max(4096,localOutputBudget(input.question)*2))
+          : Math.max(localOutputBudget(input.question), thinking ? 4096 : input.qualityMode || hasImages ? 2048 : 0), num_ctx: 8192 },
       } : {
         model: config.model,
         messages,
@@ -451,6 +455,7 @@ async function requestAnswer(input, config, signal, secondPass, repairTextFormat
   }
   try {
     const body = await readProviderJson(response, signal);
+    if(signal.aborted)throw new SolverError('request_aborted', 'أُلغي الطلب أو انتهت مهلة الاتصال.', 504);
     if (isLocal && body?.error) throw ollamaError(body, response.status);
     if ((isLocal && body?.done_reason === 'length') || (!isLocal && body?.choices?.[0]?.finish_reason === 'length')) {
       throw new SolverError('incomplete_provider_response', 'انتهى حد خرج النموذج قبل اكتمال الإجابة؛ لم تُرسل إجابة مبتورة.');
@@ -493,12 +498,26 @@ function answersAgree(first, second, question) {
   return [...first.optionIds].sort().join('\u0000') === [...second.optionIds].sort().join('\u0000');
 }
 
+async function requestCompleteAnswer(input,config,signal,secondPass,repairTextFormat,budget){
+  const request=()=>requestAnswer(input,config,signal,secondPass,{repairTextFormat,compact:budget.compact});
+  try{return await request();}
+  catch(error){
+    if((config.provider??'ollama')!=='ollama'||error.code!=='incomplete_provider_response'||budget.truncationUsed)throw error;
+    if(signal.aborted)throw new SolverError('request_aborted', 'أُلغي الطلب أو انتهت مهلة الاتصال.', 504);
+    // One fresh recovery for the entire solve. Its answer allowance is not
+    // consumed by optional thinking; independent verification stays compact
+    // too, with original evidence and no hint from a previous answer.
+    budget.truncationUsed=true;budget.compact=true;
+    return request();
+  }
+}
+
 async function requestPassAnswer(input,config,signal,secondPass,repairBudget){
   const read=async repair=>{
-    try{return await requestAnswer(input,config,signal,secondPass,repair);}
+    try{return await requestCompleteAnswer(input,config,signal,secondPass,repair,repairBudget);}
     catch(error){
       // Retry only a malformed text answer. Network, model, cancellation and
-      // truncation errors retain their original handling and total deadline.
+      // envelope errors retain their original handling and total deadline.
       if(input.question.type==='text'&&error.code==='invalid_provider_response'&&error.textFormatRepairable===true)return null;
       throw error;
     }
@@ -531,7 +550,7 @@ export async function solveQuestion(rawInput, config, parentSignal) {
   const timeout = AbortSignal.timeout(config.requestTimeoutMs ?? (config.provider === 'openai' ? 60_000 : 240_000));
   const signal = parentSignal ? AbortSignal.any([timeout, parentSignal]) : timeout;
   if ((config.provider ?? 'ollama') === 'ollama' && input.question.images?.length) await checkVisionModel(config, signal);
-  const repairBudget={used:false};
+  const repairBudget={used:false,truncationUsed:false,compact:false};
   const first = await requestPassAnswer(input, config, signal, false,repairBudget);
   if (!first) {
     return { answer: { optionIds: [], text: '', explanation: '', confidence: 0,

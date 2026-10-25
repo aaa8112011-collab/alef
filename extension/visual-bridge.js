@@ -116,7 +116,7 @@ async function handleVisualCapture(message,sender){
     if(sender.id!==chrome.runtime.id||!Number.isSafeInteger(frameId)||frameId<0||
       !['image','background','canvas','svg'].includes(message.kind)||typeof message.target!=='string'||
       !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(message.target)||
-      typeof message.expectedURL!=='string'||message.expectedURL!==sender.url||typeof message.source!=='string'||
+      !bridgeSenderMatchesURL(sender,message.expectedURL)||typeof message.source!=='string'||
       message.source.length>(message.kind==='svg'?1_000_000:8192))return failure('visual_invalid_request','طلب قراءة الرسم غير صالح.');
     const controller=runs.get(tabId),routes=frameRoutes.get(tabId),state=states.get(tabId);
     const active=()=>{

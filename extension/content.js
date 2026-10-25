@@ -1,7 +1,7 @@
 (() => {
   'use strict';
-  if (globalThis.__alefAssistantInstalled==='0.5.12') return;
-  globalThis.__alefAssistantInstalled = '0.5.12';
+  if (globalThis.__alefAssistantInstalled==='0.5.13') return;
+  globalThis.__alefAssistantInstalled = '0.5.13';
 
   let selectors = {};
   let subjects = new Map();
@@ -1481,7 +1481,7 @@
       appRoots:[...document.querySelectorAll('#root,#app,app-root,[data-reactroot],main')].slice(0,8).map(node=>({
         tag:node.tagName,kind:node.matches('#root')?'root':node.matches('#app')?'app':node.matches('main')?'main':'app-root',
         children:node.childElementCount,visible:visible(node)}))};
-    return {ok:true,diagnostics:{version:'0.5.12',page:{url:cleanUrl(location.href)},stage:snapshot.stage,rendering,
+    return {ok:true,diagnostics:{version:'0.5.13',page:{url:cleanUrl(location.href)},stage:snapshot.stage,rendering,
       subjects:snapshot.subjects,lessons:snapshot.lessons.map(({href,...lesson})=>({...lesson,href:href?cleanUrl(href):undefined})),
       navigation:snapshot.navigation,issues:snapshot.diagnostics,frames:snapshot.frames,loading:snapshot.loading,
       ...(snapshot.questionEvidence?{questionEvidence:snapshot.questionEvidence}:{}),

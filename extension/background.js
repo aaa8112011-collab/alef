@@ -123,6 +123,19 @@ function frameOrigin(value,topOrigin) {
   }catch{}
   return null;
 }
+function bridgeSenderMatchesURL(sender,expectedURL){
+  if(typeof sender?.url!=='string'||typeof expectedURL!=='string')return false;
+  try{
+    const source=new URL(sender.url),current=new URL(expectedURL);
+    if(!['https:','http:'].includes(source.protocol)||source.origin!==current.origin||
+      source.username||source.password||current.username||current.password)return false;
+    // Chrome caches MessageSender.url when a content-script context is created.
+    // Alef changes hash/history routes in the same document. A stale route is
+    // allowed only with a document ID; live frame URL and DOM checks below
+    // remain exact and must still agree before any read or mutation.
+    return sender.url===expectedURL||typeof sender.documentId==='string'&&!!sender.documentId;
+  }catch{return false;}
+}
 function cleanFrameURL(value) {
   try {const url=new URL(value);return /^https?:$/.test(url.protocol)?url.origin+url.pathname:url.protocol==='about:'?'about:'+url.pathname:url.protocol;}catch{return '';}
 }
@@ -189,7 +202,7 @@ async function mathFieldMessage(message,sender) {
   if(sender.id!==chrome.runtime.id||!Number.isSafeInteger(frameId)||frameId<0||
     !['read','write'].includes(message.operation)||typeof message.target!=='string'||
     !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(message.target)||
-    typeof message.expectedURL!=='string'||message.expectedURL!==sender.url||
+    !bridgeSenderMatchesURL(sender,message.expectedURL)||
     message.operation==='write'&&(typeof message.value!=='string'||!message.value.trim()||message.value.length>4096))throw Error('طلب محرر المعادلات غير صالح.');
   const controller=runs.get(tabId),routes=frameRoutes.get(tabId),state=states.get(tabId);
   const bound=()=>{

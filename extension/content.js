@@ -1,7 +1,7 @@
 (() => {
   'use strict';
-  if (globalThis.__alefAssistantInstalled==='0.5.17') return;
-  globalThis.__alefAssistantInstalled = '0.5.17';
+  if (globalThis.__alefAssistantInstalled==='0.5.18') return;
+  globalThis.__alefAssistantInstalled = '0.5.18';
 
   let selectors = {};
   let subjects = new Map();
@@ -1257,6 +1257,77 @@
     if(!rect.width||!rect.height)throw new Error('تعذّر تحديد موضع السحب الحالي.');
     return {clientX:rect.left+rect.width/2,clientY:rect.top+rect.height/2};
   }
+  function weaverDragging(node){return !!node&&(hasWeaverClass(node,'is-dragging')||hasWeaverClass(node,'is-item-dragging')||node.getAttribute('aria-pressed')==='true');}
+  async function readyWeaverDrag(question,pair){
+    let ready=null,stableNode=null,stablePoint=null,stableSince=0;
+    // A committed drop can be followed by a React bank remount or layout
+    // change. Observe the current source and idle sensor before each press.
+    await waitAcknowledged(question,()=>{
+      const current=matchingControls(questionContainer()),item=current?.items.find(row=>row.id===pair.itemId),target=current?.targets.find(row=>row.id===pair.targetId);
+      if(current?.mode!=='weaver-mouse'||!item||!target)throw new Error('تغيرت عناصر السحب في السؤال الحالي.');
+      if(weaverBlankHasWord(item.node,target.text)){ready={placed:true};return true;}
+      if(current.targets.some(row=>weaverDragging(row.node))||!target.node?.isConnected||disabled(target.node)||!visible(target.node)){
+        stableNode=null;stablePoint=null;stableSince=0;return false;
+      }
+      target.node.scrollIntoView({block:'center',inline:'center',behavior:'instant'});
+      const point=weaverDragPoint(target.node),now=Date.now();
+      if(target.node!==stableNode||!stablePoint||Math.abs(point.clientX-stablePoint.clientX)>.5||Math.abs(point.clientY-stablePoint.clientY)>.5){
+        stableNode=target.node;stablePoint=point;stableSince=now;return false;
+      }
+      if(now-stableSince<80)return false;
+      ready={placed:false,target,start:point};return true;
+    },'لم تصبح كلمة السحب جاهزة في السؤال الحالي.');
+    return ready;
+  }
+  async function waitWeaverDragStart(question,pair,source){
+    const deadline=Date.now()+3000;
+    for(;;){
+      assertNotCancelled();assertQuestion(question);
+      const current=matchingControls(questionContainer()),active=current?.targets.find(row=>row.id===pair.targetId)?.node;
+      if(weaverDragging(active))return true;
+      // If the replacement has no acknowledged drag, release the stale
+      // press and prepare the source again instead of waiting on old markup.
+      if(!source.isConnected||source!==active||disabled(active)||Date.now()>=deadline)return false;
+      await delay(40);
+    }
+  }
+  async function applyWeaverDrag(question,pair){
+    for(let attempt=0;attempt<2;attempt++){
+      const ready=await readyWeaverDrag(question,pair);
+      if(ready.placed)return null;
+      const {target,start}=ready,realm=view(target.node),doc=target.node.ownerDocument;
+      const mouse=(type,point,buttons)=>new realm.MouseEvent(type,{...point,bubbles:true,cancelable:true,composed:true,view:realm,button:0,buttons});
+      let released=false,end=null;
+      assertNotCancelled();assertQuestion(question);
+      try{
+        // Hold until the real sensor acknowledges activation. Retry only a
+        // press that never started, at most once, using fresh DOM geometry.
+        target.node.dispatchEvent(mouse('mousedown',start,1));
+        if(!await waitWeaverDragStart(question,pair,target.node))continue;
+        const moveToBlank=()=>{
+          const blank=matchingControls(questionContainer())?.items.find(row=>row.id===pair.itemId)?.node;
+          if(!blank)throw new Error('فراغ الإجابة لم يعد متاحًا.');
+          blank.scrollIntoView({block:'center',inline:'center',behavior:'instant'});
+          const point=weaverDragPoint(blank);
+          const moved=!end||Math.abs(point.clientX-end.clientX)>.5||Math.abs(point.clientY-end.clientY)>.5;
+          // Scrolling can keep viewport coordinates while moving the blank.
+          // Keep the button held until that exact blank acknowledges hover.
+          if(moved||!hasWeaverClass(blank,'is-about-to-drop')){end=point;doc.dispatchEvent(mouse('mousemove',end,1));}
+          return {blank,moved};
+        };
+        moveToBlank();
+        await waitAcknowledged(question,()=>{const {blank,moved}=moveToBlank();return !moved&&hasWeaverClass(blank,'is-about-to-drop');},'لم يؤكد الموقع موضع إسقاط الكلمة.');
+        assertNotCancelled();assertQuestion(question);
+        doc.dispatchEvent(mouse('mouseup',end,0));released=true;
+        const releasedAt=performance.now();
+        await waitAcknowledged(question,()=>weaverBlankHasWord(matchingControls(questionContainer())?.items.find(row=>row.id===pair.itemId)?.node,target.text),'لم يؤكد الموقع وضع الكلمة في الفراغ.');
+        return releasedAt;
+      }finally{
+        if(!released){doc.dispatchEvent(new realm.KeyboardEvent('keydown',{key:'Escape',code:'Escape',bubbles:true,cancelable:true}));doc.dispatchEvent(mouse('mouseup',start,0));}
+      }
+    }
+    throw new Error('لم يبدأ الموقع سحب الكلمة بعد إعادة المحاولة.');
+  }
   async function applyMatching(question,answer,message){
     const original=matchingControls(questionContainer());
     let lastMouseReleaseAt=null;
@@ -1278,39 +1349,8 @@
         current=matchingControls(questionContainer());item=current.items.find(row=>row.id===pair.itemId);
         await waitAcknowledged(question,()=>blankHasWord(matchingControls(questionContainer())?.items.find(row=>row.id===pair.itemId)?.node,target.text),'لم يؤكد الموقع وضع الكلمة في الفراغ.');
       }else if(current.mode==='weaver-mouse'){
-        if(weaverBlankHasWord(item.node,target.text))continue;
-        if(!target.node||disabled(target.node))throw new Error('كلمة السحب غير متاحة في السؤال الحالي.');
-        const realm=view(target.node),doc=target.node.ownerDocument;
-        target.node.scrollIntoView({block:'center',inline:'center',behavior:'instant'});
-        assertNotCancelled();assertQuestion(question);
-        const start=weaverDragPoint(target.node);
-        const mouse=(type,point,buttons)=>new realm.MouseEvent(type,{...point,bubbles:true,cancelable:true,composed:true,view:realm,button:0,buttons});
-        let released=false,end=null;
-        try{
-          // Keep the primary button held until the actual MouseSensor activates.
-          // Some lessons activate in 100 ms; others require about a second.
-          target.node.dispatchEvent(mouse('mousedown',start,1));
-          await waitAcknowledged(question,()=>{const active=matchingControls(questionContainer()).targets.find(row=>row.id===pair.targetId)?.node;return !!active&&(hasWeaverClass(active,'is-dragging')||hasWeaverClass(active,'is-item-dragging')||active.getAttribute('aria-pressed')==='true');},'لم يبدأ الموقع سحب الكلمة.');
-          const moveToBlank=()=>{
-            const blank=matchingControls(questionContainer())?.items.find(row=>row.id===pair.itemId)?.node;
-            if(!blank)throw new Error('فراغ الإجابة لم يعد متاحًا.');
-            blank.scrollIntoView({block:'center',inline:'center',behavior:'instant'});
-            const point=weaverDragPoint(blank);
-            const moved=!end||Math.abs(point.clientX-end.clientX)>.5||Math.abs(point.clientY-end.clientY)>.5;
-            // Scrolling can keep the same viewport coordinates while moving
-            // the underlying blank. Re-dispatch until that blank acknowledges
-            // hover, including after a layout change caused by the first move.
-            if(moved||!hasWeaverClass(blank,'is-about-to-drop')){end=point;doc.dispatchEvent(mouse('mousemove',end,1));}
-            return {blank,moved};
-          };
-          moveToBlank();
-          await waitAcknowledged(question,()=>{const {blank,moved}=moveToBlank();return !moved&&hasWeaverClass(blank,'is-about-to-drop');},'لم يؤكد الموقع موضع إسقاط الكلمة.');
-          assertNotCancelled();assertQuestion(question);
-          doc.dispatchEvent(mouse('mouseup',end,0));released=true;lastMouseReleaseAt=performance.now();
-          await waitAcknowledged(question,()=>weaverBlankHasWord(matchingControls(questionContainer())?.items.find(row=>row.id===pair.itemId)?.node,target.text),'لم يؤكد الموقع وضع الكلمة في الفراغ.');
-        }finally{
-          if(!released){doc.dispatchEvent(new realm.KeyboardEvent('keydown',{key:'Escape',code:'Escape',bubbles:true,cancelable:true}));doc.dispatchEvent(mouse('mouseup',start,0));}
-        }
+        const releasedAt=await applyWeaverDrag(question,pair);
+        if(releasedAt!==null)lastMouseReleaseAt=releasedAt;
       }else{
         const realm=view(item.node),transfer=new realm.DataTransfer();transfer.setData('text/plain',pair.itemId);
         item.node.dispatchEvent(new realm.DragEvent('dragstart',{bubbles:true,dataTransfer:transfer}));target.node.dispatchEvent(new realm.DragEvent('dragover',{bubbles:true,cancelable:true,dataTransfer:transfer}));target.node.dispatchEvent(new realm.DragEvent('drop',{bubbles:true,dataTransfer:transfer}));item.node.dispatchEvent(new realm.DragEvent('dragend',{bubbles:true,dataTransfer:transfer}));await delay(60);
@@ -1494,7 +1534,7 @@
       appRoots:[...document.querySelectorAll('#root,#app,app-root,[data-reactroot],main')].slice(0,8).map(node=>({
         tag:node.tagName,kind:node.matches('#root')?'root':node.matches('#app')?'app':node.matches('main')?'main':'app-root',
         children:node.childElementCount,visible:visible(node)}))};
-    return {ok:true,diagnostics:{version:'0.5.17',page:{url:cleanUrl(location.href)},stage:snapshot.stage,rendering,
+    return {ok:true,diagnostics:{version:'0.5.18',page:{url:cleanUrl(location.href)},stage:snapshot.stage,rendering,
       subjects:snapshot.subjects,lessons:snapshot.lessons.map(({href,...lesson})=>({...lesson,href:href?cleanUrl(href):undefined})),
       navigation:snapshot.navigation,issues:snapshot.diagnostics,frames:snapshot.frames,loading:snapshot.loading,
       ...(snapshot.questionEvidence?{questionEvidence:snapshot.questionEvidence}:{}),

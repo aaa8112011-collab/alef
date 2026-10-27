@@ -1,7 +1,7 @@
 (() => {
   'use strict';
-  if (globalThis.__alefAssistantInstalled==='0.5.18') return;
-  globalThis.__alefAssistantInstalled = '0.5.18';
+  if (globalThis.__alefAssistantInstalled==='0.5.19') return;
+  globalThis.__alefAssistantInstalled = '0.5.19';
 
   let selectors = {};
   let subjects = new Map();
@@ -380,6 +380,11 @@
     if(readPass)readPass.learning=result;
     return result;
   }
+  function isSubmitLabel(label){
+    // Match whole normalized labels. The Arabic player uses the first-person
+    // imperative, not just the noun "إرسال" used by other layouts.
+    return /^(تحقق|تحقق من الاجابة|ارسال|ارسال الاجابة|ارسل اجابتي|تاكيد الاجابة|حفظ الاجابة|submit|submit answer|check|check answer|confirm answer)$/.test(label);
+  }
   function actionKind(node) {
     const testId=node.getAttribute('data-testid')||'';
     const label=norm(text(node)||node.getAttribute('aria-label'));
@@ -393,7 +398,7 @@
     if(testId==='skip-content-modal-leave-button')return 'skip';
     if(testId==='activity-navigation-bar__next-button')return 'next';
     if(testId==='activity-navigation-bar__finish-button'||testId==='finish-button')return 'finish';
-    if((testId==='next-button'||node.id==='alef-next-button')&&!/^(submit|submit answer|check|check answer|confirm answer|try again|ارسال|ارسال الاجابة|تحقق|تحقق من الاجابة|تاكيد الاجابة|حاول مرة اخري|حاول مجددا)$/.test(label))return 'next';
+    if((testId==='next-button'||node.id==='alef-next-button')&&!isSubmitLabel(label)&&!/^(try again|حاول مرة اخري|حاول مجددا)$/.test(label))return 'next';
     if(testId==='ncle-sidebar-back'||testId==='ncle-completion-page-back')return 'back';
     if(node.matches('#skill-player-practice,[data-alef-assessment],[data-testid="start-assessment"],[data-testid="practice-button"]'))return 'assessment';
     if(node.matches('[data-alef-skip],[data-testid="skip-button"],[data-testid="skip-intro"]'))return 'skip';
@@ -449,8 +454,7 @@
       if(candidates.length>1)throw new Error('زر الانتقال غير واضح؛ اضبط محدد الصفحة أولًا.');
       return candidates.length?actions.get(candidates[0].id).node:null;
     }
-    matches=all('button,[role="button"],input[type="submit"]').filter(el=>!disabled(el) &&
-      /^(تحقق|تحقق من الاجابة|ارسال|ارسال الاجابة|تاكيد الاجابة|حفظ الاجابة|submit|submit answer|check|check answer|confirm answer)$/.test(norm(text(el)||el.value)));
+    matches=all('button,[role="button"],input[type="submit"]').filter(el=>!disabled(el) && isSubmitLabel(norm(text(el)||el.value)));
     if(matches.length>1)throw new Error('زر الإرسال غير واضح؛ اضبط محدد الصفحة أولًا.');
     return matches[0]||null;
   }
@@ -567,8 +571,10 @@
     // Prefer the innermost platform player rather than its course/sidebar shell.
     const active=scopes.filter(scope=>!scopes.some(other=>other!==scope&&scope.contains(other)));
     if(!active.length&&topCourseContext&&document.body)active.push(document.body);
-    const primary=all('button,[role="button"],input[type="submit"]').filter(node=>
-      /^(submit|submit answer|check|check answer|confirm answer|try again|next|next question|continue|done|finish|ارسال|ارسال الاجابة|تحقق|تحقق من الاجابة|تاكيد الاجابة|حاول مرة اخري|حاول مجددا|التالي|متابعة|استمرار|انهاء)$/.test(norm(text(node)||node.value)));
+    const primary=all('button,[role="button"],input[type="submit"]').filter(node=>{
+      const label=norm(text(node)||node.value);
+      return isSubmitLabel(label)||/^(try again|next|next question|continue|done|finish|حاول مرة اخري|حاول مجددا|التالي|متابعة|استمرار|انهاء)$/.test(label);
+    });
     const found=[];
     let unreadable=false;
     for(const scope of active) {
@@ -1534,7 +1540,7 @@
       appRoots:[...document.querySelectorAll('#root,#app,app-root,[data-reactroot],main')].slice(0,8).map(node=>({
         tag:node.tagName,kind:node.matches('#root')?'root':node.matches('#app')?'app':node.matches('main')?'main':'app-root',
         children:node.childElementCount,visible:visible(node)}))};
-    return {ok:true,diagnostics:{version:'0.5.18',page:{url:cleanUrl(location.href)},stage:snapshot.stage,rendering,
+    return {ok:true,diagnostics:{version:'0.5.19',page:{url:cleanUrl(location.href)},stage:snapshot.stage,rendering,
       subjects:snapshot.subjects,lessons:snapshot.lessons.map(({href,...lesson})=>({...lesson,href:href?cleanUrl(href):undefined})),
       navigation:snapshot.navigation,issues:snapshot.diagnostics,frames:snapshot.frames,loading:snapshot.loading,
       ...(snapshot.questionEvidence?{questionEvidence:snapshot.questionEvidence}:{}),

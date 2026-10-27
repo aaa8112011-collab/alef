@@ -1,7 +1,7 @@
 (() => {
   'use strict';
-  if (globalThis.__alefAssistantInstalled==='0.5.19') return;
-  globalThis.__alefAssistantInstalled = '0.5.19';
+  if (globalThis.__alefAssistantInstalled==='0.5.20') return;
+  globalThis.__alefAssistantInstalled = '0.5.20';
 
   let selectors = {};
   let subjects = new Map();
@@ -37,6 +37,7 @@
   const hasWeaverClass=(node,name)=>!!node&&(node.classList.contains(name)||node.classList.contains('lib-'+name));
   const WEAVER_QUESTIONS=weaverSelector('.mcq-container.question-widget,.dropdown-container.question-widget,.open-ended-container.question-widget,.fib-container.question-widget,.dnd-container.question-widget');
   const PLAYER_SCOPES='[data-testid="assessment-content-player"],[data-testid="ncle-activity-page-player"],[data-testid="content-page-body-player"],main#player-container';
+  const PLAYER_PROGRESS_UI='[data-testid="slides-progress-bar"],[data-testid="k4-slides-progress-bar"],[data-testid="section-result-slides-progress-bar"],[data-testid="section-result-k4-slides-progress-bar"],#slides-progress-bar,#k4-slides-progress-bar,[data-testid="progress-bar-slide-count"]';
   const hash = text => {
     let n = 2166136261;
     for (const c of text) n = Math.imul(n ^ c.charCodeAt(0), 16777619);
@@ -623,7 +624,8 @@
   }
   const FIB_RESULT_ICONS=weaverSelector('.fib-input-field-container .option-icon,.fib-input-field-container .option-correct-icon,.fib-input-field-container .option-incorrect-icon');
   const DND_PLACEHOLDER_ICONS=weaverSelector('.dnd-droppable .drop-placeholder-icon');
-  const VISUAL_EXCLUSIONS=weaverSelector('.mcq-icon-container,.mcq-option-icon-container,.dnd-grip-icon,.katex,math,math-field,mjx-container,.MathJax,[data-testid$="question-feedback-container"],[data-testid="custom-feedback-container"],[data-testid="general-answer-feedback"],[data-testid="answerFeedback"],[data-testid="answer-feedback"],[data-testid="wrong-answer-feedback"],[data-testid="correct-answer-feedback"],[data-alef-feedback],[role="status"],[role="alert"],aside,nav,[role="banner"],[role="navigation"]')+','+FIB_RESULT_ICONS+','+DND_PLACEHOLDER_ICONS;
+  const DND_RESULT_ICONS=weaverSelector('.dnd-droppable img.validationIcon');
+  const VISUAL_EXCLUSIONS=weaverSelector('.mcq-icon-container,.mcq-option-icon-container,.dnd-grip-icon,.katex,math,math-field,mjx-container,.MathJax,[data-testid$="question-feedback-container"],[data-testid="custom-feedback-container"],[data-testid="general-answer-feedback"],[data-testid="answerFeedback"],[data-testid="answer-feedback"],[data-testid="wrong-answer-feedback"],[data-testid="correct-answer-feedback"],[data-alef-feedback],[role="status"],[role="alert"],aside,nav,[role="banner"],[role="navigation"]')+','+FIB_RESULT_ICONS+','+DND_PLACEHOLDER_ICONS+','+DND_RESULT_ICONS+','+PLAYER_PROGRESS_UI;
   const MAX_VISUALS=3;
   const MAX_VISUAL_BYTES=1_048_576;
   const QUESTION_ROOTS='[data-alef-question],[data-question-id],[data-testid="question-renderer"],[data-testid="new-question-renderer"],'+WEAVER_QUESTIONS;
@@ -826,11 +828,11 @@
     return {ok:true,questionId:question.id,questionFingerprint:question.fingerprint,requiresVision:question.requiresVision,images};
   }
   const PROMPT_CONTEXT=weaverSelector('[data-alef-question-context],[data-testid="question-statement-container"],.question-statement-container');
-  const CONTEXT_CHROME='aside,nav,button,[role="button"],input,textarea,select,math-field,[role="banner"],[role="navigation"],[data-testid="ncle-main-contents"],[data-testid="ncle-sidebar"],[data-testid="progress-bar-slide-count"],[role="progressbar"]';
+  const CONTEXT_CHROME='aside,nav,button,[role="button"],input,textarea,select,math-field,[role="banner"],[role="navigation"],[data-testid="ncle-main-contents"],[data-testid="ncle-sidebar"],[role="progressbar"],'+PLAYER_PROGRESS_UI;
   const PROMPT_FEEDBACK='[data-testid="general-answer-feedback"],[data-testid="answerFeedback"],[data-testid="answer-feedback"],[data-testid="correct-answer-feedback"],[data-alef-feedback],[data-testid="wrong-answer-feedback"],[data-testid$="question-feedback-container"],[data-testid="custom-feedback-container"],[role="status"],[role="alert"]';
   function promptBody(authored,{context=false,omitMediaUI=false,dropdownFields=[]}={}) {
     if(authored.nodeType===3)return visible(authored.parentElement)?clean(authored.textContent):'';
-    if(authored.matches(PROMPT_FEEDBACK)||context&&authored.matches(CONTEXT_CHROME))return '';
+    if(authored.matches(PROMPT_FEEDBACK+','+PLAYER_PROGRESS_UI)||context&&authored.matches(CONTEXT_CHROME))return '';
     const copy=authored.cloneNode(true);
     // Detached clones lose computed styles. Carry visibility from the live
     // question before removing options, so hidden distractor text cannot turn
@@ -852,7 +854,7 @@
     copy.querySelectorAll(weaverSelector('.dnd-options-draggable,.dnd-options-draggable-overlay,.dnd-overlay')).forEach(node=>node.remove());
     copy.querySelectorAll('[data-testid^="fill-blank-dd-"]').forEach(node=>node.replaceWith(' [blank:'+node.getAttribute('data-testid').slice(14)+'] '));
     copy.querySelectorAll('[data-testid="draggableChoice"],[data-testid="choice-item-dd"],[data-testid="general-answer-feedback"],[data-testid="answerFeedback"],[data-testid="answer-feedback"],[data-testid="correct-answer-feedback"],[data-alef-feedback],[data-testid="wrong-answer-feedback"],[data-testid$="question-feedback-container"],[data-testid="custom-feedback-container"],[role="status"],[role="alert"]').forEach(node=>node.remove());
-    copy.querySelectorAll('math-field').forEach(node=>node.remove());
+    copy.querySelectorAll('math-field,'+PLAYER_PROGRESS_UI).forEach(node=>node.remove());
     copy.querySelectorAll('button,input,textarea,[data-alef-option],[data-testid="choice-item"],[role="radio"],[role="checkbox"],label,[data-testid="matching-choices"],[data-testid="matching-answers"],[data-testid^="matching-choice-"],[data-testid^="matching-answer-"],[data-alef-item],[data-alef-target],[role="listbox"],[class*="react-select"],[hidden],[aria-hidden="true"],script,style').forEach(node=>node.remove());
     if(context)copy.querySelectorAll(CONTEXT_CHROME).forEach(node=>node.remove());
     if(omitMediaUI)copy.querySelectorAll(MEDIA_UI).forEach(node=>node.remove());
@@ -1026,10 +1028,16 @@
     if(!prompt)throw new Error('لم يظهر نص السؤال بوضوح.');
     if(type!=='matching'&&!visuals.length&&genericInstructionOnly(prompt))throw new Error('لم يُقرأ نص المسألة؛ ظهرت تعليمات اختيار الإجابة فقط. لم يُرسل سؤال ناقص للنموذج؛ صدّر فحص الصفحة لتحديد موضع النص.');
     if(options.some(option=>!option.text)||new Set(options.map(option=>option.id)).size!==options.length)throw new Error('خيارات الإجابة غير واضحة أو متكررة.');
-    const fingerprint=hash(JSON.stringify([prompt,type,options,extra,visuals,text(first('[data-testid="progress-bar-slide-count"]'))]));
     const code=first('[data-testid^="question-renderer-"]',container)?.getAttribute('data-testid');
-    const id=container.getAttribute('data-alef-question')||container.getAttribute('data-question-id')||code||`question-${fingerprint}`;
-    return {ok:true,question:{id,text:prompt,type,options,...extra,fingerprint,...(requiresVision?{requiresVision:true,visuals}:{})},completed:false,canNext:!!button('next'),feedback:feedback(container)};
+    const authoredId=container.getAttribute('data-alef-question')||container.getAttribute('data-question-id')||code||null;
+    const evidence=[prompt,type,options,extra,visuals];
+    const fingerprint=hash(JSON.stringify([...evidence,text(first('[data-testid="progress-bar-slide-count"]'))]));
+    // A Next click can update the counter before React replaces the widget.
+    // Keep a separate evidence identity so that counter alone is not a new
+    // ready question. Authored IDs still distinguish genuinely identical items.
+    const contentFingerprint=hash(JSON.stringify([authoredId,...evidence]));
+    const id=authoredId||`question-${fingerprint}`;
+    return {ok:true,question:{id,text:prompt,type,options,...extra,fingerprint,contentFingerprint,...(requiresVision?{requiresVision:true,visuals}:{})},completed:false,canNext:!!button('next'),feedback:feedback(container)};
   }
   function setValue(control,value) {
     const realm=view(control),proto=control.tagName==='TEXTAREA'?realm.HTMLTextAreaElement.prototype:control.tagName==='SELECT'?realm.HTMLSelectElement.prototype:realm.HTMLInputElement.prototype;
@@ -1540,7 +1548,7 @@
       appRoots:[...document.querySelectorAll('#root,#app,app-root,[data-reactroot],main')].slice(0,8).map(node=>({
         tag:node.tagName,kind:node.matches('#root')?'root':node.matches('#app')?'app':node.matches('main')?'main':'app-root',
         children:node.childElementCount,visible:visible(node)}))};
-    return {ok:true,diagnostics:{version:'0.5.19',page:{url:cleanUrl(location.href)},stage:snapshot.stage,rendering,
+    return {ok:true,diagnostics:{version:'0.5.20',page:{url:cleanUrl(location.href)},stage:snapshot.stage,rendering,
       subjects:snapshot.subjects,lessons:snapshot.lessons.map(({href,...lesson})=>({...lesson,href:href?cleanUrl(href):undefined})),
       navigation:snapshot.navigation,issues:snapshot.diagnostics,frames:snapshot.frames,loading:snapshot.loading,
       ...(snapshot.questionEvidence?{questionEvidence:snapshot.questionEvidence}:{}),

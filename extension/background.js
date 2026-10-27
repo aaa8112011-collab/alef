@@ -641,6 +641,13 @@ async function afterSubmission(tabId,question,config,origin,signal) {
     const terminal=last.permissionRequired||blockedLessonMessage(last)||last.completed||last.stage==='complete'||last.stage==='lessons';
     const accepted=last.feedback==='correct';
     const ready=terminal||last.question&&!sameQuestion(last,question)||last.needsPreparation;
+    // After our own Next, the counter may lead the widget's React commit.
+    // Do not resolve the old evidence again or click Next twice during that
+    // gap. A fresh authored ID also changes this content-only fingerprint.
+    if(lastNavigation&&!terminal&&!last.needsPreparation&&question.contentFingerprint&&
+      last.question?.contentFingerprint===question.contentFingerprint){
+      await pause(250,signal);continue;
+    }
     // A question may unmount before its Next transition finishes. Do not hand
     // that busy instruction shell to runLesson, whose own click history starts
     // before submission. A new ready question or a new forward control can
